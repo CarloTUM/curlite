@@ -1,0 +1,35 @@
+[package]
+name = "curlite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Small blocking HTTP client on top of libcurl: forms, multipart and raw bodies without an async runtime"
+repository = "https://github.com/CarloTUM/curlite"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["http", "client", "curl", "blocking", "multipart"]
+categories = ["web-programming::http-client", "embedded"]
+exclude = ["/.github"]
+
+[features]
+default = []
+# `Parameter` and friends implement `serde::Serialize`
+serde = ["dep:serde"]
+# Pass-through of the curl crate's linking features. Default stays dynamic.
+static-curl = ["curl/static-curl"]
+static-ssl = ["curl/static-ssl"]
+rustls = ["curl/rustls", "curl/static-curl"]
+
+[dependencies]
+bytes = "1"
+curl = "0.4"
+form_urlencoded = "1"
+http = "1"
+mime = "0.3"
+multipart = { package = "multipart_ng", version = "0.18", default-features = false, features = ["server"] }
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = "2"
+url = "2"
+
+[package.metadata.docs.rs]
+all-features = true
