@@ -87,8 +87,11 @@ Debian 13) for one `GET` per process, CPU time and peak RSS:
 | `static-curl` + `rustls` | aws-lc, jitter entropy on | 5.9 ms, 3.0 MiB | **433 ms** | 3.4 MiB |
 | `static-curl` + `rustls`, `AWS_LC_SYS_NO_JITTER_ENTROPY=1` | aws-lc | 5.5 ms, 3.0 MiB | 21 ms | 3.4 MiB |
 | `static-curl` + rustls on ring, non-PIE | ring | 4.7 ms, 2.6 MiB | 28 ms | 1.9 MiB |
+| same, static musl binary | ring | **3.0 ms, 1.1 MiB** | 26 ms | 2.0 MiB |
+| ureq 3 (rustls), for comparison | rustls | 4.3 ms, 2.4 MiB | 21 ms | 1.6 MiB |
+| minreq, for comparison | rustls | 3.5 ms, 2.1 MiB | 20 ms | 1.2 MiB |
 
-An empty C program costs 2.1 ms and 0.7 MiB on that board. The lessons:
+An empty C program costs 1.5 ms and 0.7 MiB on that board. The lessons:
 
 - **The TLS library is the cost, not the HTTP client.** OpenSSL 3 spends
   about 8 ms of CPU and 4.7 MiB on its own initialisation, which libcurl
@@ -103,10 +106,28 @@ An empty C program costs 2.1 ms and 0.7 MiB on that board. The lessons:
 - `-C relocation-model=static` (no PIE) removes the executable's own
   relocations; a static musl build removes the dynamic loader entirely.
 
-The rustls-on-ring configuration needs a `rustls-ring` feature in the
-`curl` crate that is not upstream yet; the
+The leanest configuration, a static musl binary with rustls on ring:
+
+```toml
+# Cargo.toml of the program
+[dependencies]
+curlite = { version = "0.2", default-features = false }
+curl = { version = "0.4", default-features = false, features = ["rustls-ring", "static-curl"] }
+
+# .cargo/config.toml
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
+```
+
+```sh
+CC_aarch64_unknown_linux_musl=musl-gcc cargo build --release --target aarch64-unknown-linux-musl
+```
+
+The `rustls-ring` feature of the `curl` crate is not upstream yet; the
 [benchmark repository](https://github.com/CarloTUM/curlite-bench) carries
-the patch and the measurement scripts.
+the patch, the build recipe and the measurement scripts. Until it lands,
+`rustls` with `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the environment of the
+build gets the same cold start and a slightly faster handshake on ARM.
 
 ## How it runs
 
