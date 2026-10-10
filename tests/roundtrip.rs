@@ -901,3 +901,114 @@ fn slow_consumer_is_not_a_stall() {
     drop(reader);
     server.join().unwrap();
 }
+
+#[test]
+fn basic_and_bearer_are_sent_up_front() {
+    let (url, server) = serve(vec![
+        response("200 OK", &[], b""),
+        response("200 OK", &[], b""),
+        response("200 OK", &[], b""),
+    ]);
+    curlite::get(&url)
+        .basic_auth("user", "pass")
+        .send()
+        .unwrap();
+    curlite::get(&url).bearer_auth("t0k").send().unwrap();
+    // an explicit header wins over the bearer
+    curlite::get(&url)
+        .bearer_auth("t0k")
+        .header("Authorization", "Custom x")
+        .send()
+        .unwrap();
+    let received = server.join().unwrap();
+    assert_eq!(
+        received[0].header("authorization"),
+        Some("Basic dXNlcjpwYXNz")
+    );
+    assert_eq!(received[1].header("authorization"), Some("Bearer t0k"));
+    assert_eq!(received[2].header("authorization"), Some("Custom x"));
+}
+
+#[test]
+fn digest_answers_the_challenge() {
+    let (url, server) = serve(vec![
+        response(
+            "401 Unauthorized",
+            &[(
+                "WWW-Authenticate",
+                "Digest realm=\"r\", nonce=\"n\", qop=\"auth\"",
+            )],
+            b"",
+        ),
+        response("200 OK", &[], b"in"),
+    ]);
+    let resp = curlite::get(&format!("{url}/p"))
+        .auth(curlite::Auth::Digest {
+            user: "u".into(),
+            password: "p".into(),
+        })
+        .send()
+        .unwrap();
+    assert_eq!(resp.text().unwrap(), "in");
+    let received = server.join().unwrap();
+    assert_eq!(received[0].header("authorization"), None);
+    let digest = received[1].header("authorization").unwrap();
+    assert!(digest.starts_with("Digest username=\"u\""), "{digest}");
+    assert!(digest.contains("uri=\"/p\""), "{digest}");
+}
+
+#[test]
+fn credentials_do_not_leave_the_origin() {
+    let (other_url, other) = serve(vec![response("200 OK", &[], b"other")]);
+    let (url, server) = serve(vec![
+        response("302 Found", &[("Location", "/same")], b""),
+        response("302 Found", &[("Location", &other_url)], b""),
+    ]);
+    let resp = curlite::get(&url).basic_auth("u", "p").send().unwrap();
+    assert_eq!(resp.text().unwrap(), "other");
+    let received = server.join().unwrap();
+    assert!(received[0].header("authorization").is_some());
+    assert!(
+        received[1].header("authorization").is_some(),
+        "same origin keeps them"
+    );
+    let received = other.join().unwrap();
+    assert_eq!(
+        received[0].header("authorization"),
+        None,
+        "other port drops them"
+    );
+}
+
+/// libcurl reads `$HOME/.netrc`, and `HOME` cannot be changed safely in a
+/// process full of threads, so the real test runs in a child process.
+#[test]
+fn netrc_supplies_credentials() {
+    if std::env::var_os("CURLITE_NETRC_CHILD").is_none() {
+        let home = std::env::temp_dir().join(format!("curlite-netrc-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(".netrc"),
+            "machine 127.0.0.1 login nu password np\n",
+        )
+        .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "netrc_supplies_credentials"])
+            .env("HOME", &home)
+            .env("CURLITE_NETRC_CHILD", "1")
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(status.success());
+        return;
+    }
+    let (url, server) = serve(vec![
+        response("200 OK", &[], b""),
+        response("200 OK", &[], b""),
+    ]);
+    curlite::get(&url).netrc().send().unwrap();
+    curlite::get(&url).send().unwrap();
+    let received = server.join().unwrap();
+    assert_eq!(received[0].header("authorization"), Some("Basic bnU6bnA="));
+    assert_eq!(received[1].header("authorization"), None, "only when asked");
+}

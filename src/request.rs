@@ -25,6 +25,33 @@ pub enum HttpVersion {
     Http3,
 }
 
+/// HTTP authentication, see [`Request::auth`]. Credentials are handed to
+/// libcurl, which answers the server's challenge; only `Basic` and `Bearer`
+/// are sent without being asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Auth {
+    Basic {
+        user: String,
+        password: String,
+    },
+    /// `Authorization: Bearer <token>`, unless the request sets that header.
+    Bearer(String),
+    Digest {
+        user: String,
+        password: String,
+    },
+    /// Kerberos (SPNEGO) with the credentials of the process, like
+    /// `curl --negotiate -u :`. A system libcurl has it; a static one
+    /// needs the `curl` crate's `spnego` feature and the GSS-API headers.
+    Negotiate,
+    /// NTLM. A static libcurl needs the `curl` crate's `ntlm` feature.
+    Ntlm {
+        user: String,
+        password: String,
+    },
+}
+
 /// A request under construction. Created with [`Request::new`], one of the
 /// free functions ([`get`], [`post`], ...) or a [`Client`], and sent with
 /// [`Request::send`] or [`Request::send_to`].
@@ -61,6 +88,8 @@ pub struct Request {
     pub(crate) ca_bundle: Option<PathBuf>,
     pub(crate) verify_tls: bool,
     pub(crate) compression: bool,
+    pub(crate) auth: Option<Auth>,
+    pub(crate) netrc: bool,
     /// First error from a builder method, returned by `send`.
     error: Option<Error>,
 }
@@ -95,6 +124,8 @@ impl Request {
             ca_bundle: None,
             verify_tls: true,
             compression: true,
+            auth: None,
+            netrc: false,
             error: None,
         }
     }
@@ -294,6 +325,34 @@ impl Request {
     /// default `true`. Off, the raw body is returned.
     pub fn compression(mut self, enabled: bool) -> Self {
         self.compression = enabled;
+        self
+    }
+
+    /// Authenticates with the given method. Credentials are dropped, like an
+    /// `Authorization` header, when a redirect leaves the origin.
+    pub fn auth(mut self, auth: Auth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// [`Auth::Basic`].
+    pub fn basic_auth(self, user: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth(Auth::Basic {
+            user: user.into(),
+            password: password.into(),
+        })
+    }
+
+    /// [`Auth::Bearer`].
+    pub fn bearer_auth(self, token: impl Into<String>) -> Self {
+        self.auth(Auth::Bearer(token.into()))
+    }
+
+    /// Takes credentials for the host from `~/.netrc` when the request has
+    /// none, like `curl --netrc-optional`. Looked up per host, so they
+    /// survive redirects.
+    pub fn netrc(mut self) -> Self {
+        self.netrc = true;
         self
     }
 

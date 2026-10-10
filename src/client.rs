@@ -4,7 +4,7 @@ use http::header::{HeaderMap, HeaderName, HeaderValue};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::request::{HttpVersion, Request};
+use crate::request::{Auth, HttpVersion, Request};
 
 /// Defaults shared by several requests: headers, timeouts and redirect
 /// handling. Requests built from a client start with these values and can
@@ -39,6 +39,8 @@ pub struct Client {
     ca_bundle: Option<PathBuf>,
     verify_tls: bool,
     compression: bool,
+    auth: Option<Auth>,
+    netrc: bool,
 }
 
 impl Default for Client {
@@ -57,6 +59,8 @@ impl Default for Client {
             ca_bundle: defaults.ca_bundle,
             verify_tls: defaults.verify_tls,
             compression: defaults.compression,
+            auth: defaults.auth,
+            netrc: defaults.netrc,
         }
     }
 }
@@ -141,6 +145,31 @@ impl Client {
         self
     }
 
+    /// See [`Request::auth`].
+    pub fn auth(mut self, auth: Auth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// See [`Request::basic_auth`].
+    pub fn basic_auth(self, user: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth(Auth::Basic {
+            user: user.into(),
+            password: password.into(),
+        })
+    }
+
+    /// See [`Request::bearer_auth`].
+    pub fn bearer_auth(self, token: impl Into<String>) -> Self {
+        self.auth(Auth::Bearer(token.into()))
+    }
+
+    /// See [`Request::netrc`].
+    pub fn netrc(mut self) -> Self {
+        self.netrc = true;
+        self
+    }
+
     /// Starts a request with this client's defaults.
     pub fn request(&self, method: Method, url: &str) -> Request {
         let mut request = Request::new(method, url);
@@ -156,6 +185,8 @@ impl Client {
         request.ca_bundle = self.ca_bundle.clone();
         request.verify_tls = self.verify_tls;
         request.compression = self.compression;
+        request.auth = self.auth.clone();
+        request.netrc = self.netrc;
         request
     }
 
@@ -207,7 +238,9 @@ mod tests {
             .unix_socket("/run/x.sock")
             .ca_bundle("/etc/ca.pem")
             .danger_accept_invalid_certs()
-            .compression(false);
+            .compression(false)
+            .bearer_auth("t")
+            .netrc();
         let req = client.post("http://localhost").header("X-A", "2");
         assert_eq!(req.method, Method::POST);
         assert_eq!(req.headers[USER_AGENT], "client");
@@ -229,5 +262,7 @@ mod tests {
         );
         assert!(!req.verify_tls);
         assert!(!req.compression);
+        assert_eq!(req.auth, Some(Auth::Bearer("t".into())));
+        assert!(req.netrc);
     }
 }

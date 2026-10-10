@@ -35,7 +35,11 @@ Added:
 - `Response::error_for_status` and `Error::Status`.
 - `Response::url` and `ResponseReader::url`: where the response came from,
   after redirects.
-- `Request::to_curl`: the request as a `curl` command line.
+- `Request::to_curl`: the request as a `curl` command line. Secrets are
+  printed as shell variables (`-u "user:$PASSWORD"`), never as values.
+- `Request::auth` with `Auth::{Basic, Bearer, Digest, Negotiate, Ntlm}`,
+  `basic_auth`, `bearer_auth`, and `netrc` for credentials from `~/.netrc`;
+  all also on `Client`.
 - `ResponsePart::parts` splits a nested multipart part.
 - `Client`: headers, timeouts, redirect and connection settings shared by
   requests.

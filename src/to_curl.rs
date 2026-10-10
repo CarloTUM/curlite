@@ -1,12 +1,12 @@
 //! [`Request::to_curl`]: the request as a `curl` command line.
 
 use http::Method;
-use http::header::CONTENT_TYPE;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, PROXY_AUTHORIZATION};
 
 use std::fmt::Write as _;
 
 use crate::body::Body;
-use crate::request::{HttpVersion, Request};
+use crate::request::{Auth, HttpVersion, Request};
 
 /// Bodies and fields up to this size are quoted inline; larger ones are
 /// read from standard input in the printed command.
@@ -25,14 +25,20 @@ impl Request {
     /// lowercase, as [`http`] stores them. Values are single-quoted for a
     /// POSIX shell, one option per line.
     ///
+    /// Secrets are not printed. Passwords, bearer tokens and the values of
+    /// `Authorization` and `Proxy-Authorization` headers appear as shell
+    /// variables (`-u "user:$PASSWORD"`, `--oauth2-bearer "$TOKEN"`,
+    /// `-H "authorization: $AUTHORIZATION"`), so the output is safe for a
+    /// log and runs once the variable is exported.
+    ///
     /// ```
     /// let request = curlite::post("https://example.com/api?v=1")
-    ///     .header("Authorization", "Bearer secret")
+    ///     .basic_auth("alice", "secret")
     ///     .form([("name", "a b")]);
     /// assert_eq!(
     ///     request.to_curl(),
     ///     "curl 'https://example.com/api?v=1' \\\n  \
-    ///        -H 'authorization: Bearer secret' \\\n  \
+    ///        -u \"alice:$PASSWORD\" \\\n  \
     ///        --data 'name=a+b' \\\n  \
     ///        -L --max-redirs 10 \\\n  \
     ///        --compressed"
@@ -49,16 +55,29 @@ impl Request {
             &Method::POST if has_body => {}
             method => lines.push(format!("-X {method}")),
         }
+        let has_authorization = self.headers.contains_key(AUTHORIZATION);
+        match &self.auth {
+            None => {}
+            Some(Auth::Bearer(_)) if has_authorization => {}
+            Some(Auth::Bearer(_)) => lines.push("--oauth2-bearer \"$TOKEN\"".to_owned()),
+            Some(Auth::Negotiate) => lines.push("--negotiate -u :".to_owned()),
+            Some(Auth::Basic { user, .. }) => lines.push(user_option("", user)),
+            Some(Auth::Digest { user, .. }) => lines.push(user_option("--digest ", user)),
+            Some(Auth::Ntlm { user, .. }) => lines.push(user_option("--ntlm ", user)),
+        }
         for (name, value) in &self.headers {
             let value = String::from_utf8_lossy(value.as_bytes());
             let value = value.trim();
-            // "Name;" is curl's syntax for a header with an empty value
-            let line = if value.is_empty() {
-                format!("{};", name.as_str())
+            let line = if name == AUTHORIZATION || name == PROXY_AUTHORIZATION {
+                let variable = name.as_str().to_ascii_uppercase().replace('-', "_");
+                format!("-H \"{name}: ${variable}\"")
+            } else if value.is_empty() {
+                // "Name;" is curl's syntax for a header with an empty value
+                format!("-H {}", quote(&format!("{name};")))
             } else {
-                format!("{}: {value}", name.as_str())
+                format!("-H {}", quote(&format!("{name}: {value}")))
             };
-            lines.push(format!("-H {}", quote(&line)));
+            lines.push(line);
         }
         let content_type = match &self.body {
             Body::Raw { content_type, .. } => content_type.as_ref(),
@@ -118,6 +137,9 @@ impl Request {
                 lines.push("--data-binary @-".to_owned());
                 notes.push("body: streamed, on standard input".to_owned());
             }
+        }
+        if self.netrc {
+            lines.push("--netrc-optional".to_owned());
         }
         if self.follow_redirects {
             lines.push(format!("-L --max-redirs {}", self.max_redirects));
@@ -179,9 +201,21 @@ fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// `-u "user:$PASSWORD"`, the user escaped for double quotes.
+fn user_option(prefix: &str, user: &str) -> String {
+    let mut escaped = String::with_capacity(user.len());
+    for c in user.chars() {
+        if matches!(c, '"' | '$' | '`' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    format!("{prefix}-u \"{escaped}:$PASSWORD\"")
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{HttpVersion, Multipart, delete, get, head, post, put};
+    use crate::{Auth, HttpVersion, Multipart, delete, get, head, post, put};
     use std::io::Cursor;
     use std::time::Duration;
 
@@ -283,6 +317,53 @@ mod tests {
             streamed,
             "curl 'http://h' \\\n  -X PUT \\\n  -H 'Content-Type: text/plain' \\\n  --data-binary @-  # body: streamed, on standard input"
         );
+    }
+
+    #[test]
+    fn secrets_become_variables() {
+        let base = || get("http://h").follow_redirects(false).compression(false);
+        assert_eq!(
+            base().basic_auth("al\"i$ce", "pw").to_curl(),
+            "curl 'http://h' \\\n  -u \"al\\\"i\\$ce:$PASSWORD\""
+        );
+        assert_eq!(
+            base()
+                .auth(Auth::Digest {
+                    user: "u".into(),
+                    password: "p".into()
+                })
+                .to_curl(),
+            "curl 'http://h' \\\n  --digest -u \"u:$PASSWORD\""
+        );
+        assert_eq!(
+            base()
+                .auth(Auth::Ntlm {
+                    user: "u".into(),
+                    password: "p".into()
+                })
+                .netrc()
+                .to_curl(),
+            "curl 'http://h' \\\n  --ntlm -u \"u:$PASSWORD\" \\\n  --netrc-optional"
+        );
+        assert_eq!(
+            base().auth(Auth::Negotiate).to_curl(),
+            "curl 'http://h' \\\n  --negotiate -u :"
+        );
+        assert_eq!(
+            base().bearer_auth("t").to_curl(),
+            "curl 'http://h' \\\n  --oauth2-bearer \"$TOKEN\""
+        );
+        // an explicit header wins over the bearer, and is itself hidden
+        let explicit = base()
+            .bearer_auth("t")
+            .header("Authorization", "Basic abc")
+            .header("Proxy-Authorization", "Basic xyz")
+            .to_curl();
+        assert_eq!(
+            explicit,
+            "curl 'http://h' \\\n  -H \"authorization: $AUTHORIZATION\" \\\n  -H \"proxy-authorization: $PROXY_AUTHORIZATION\""
+        );
+        assert!(!explicit.contains("abc") && !explicit.contains("xyz"));
     }
 
     #[test]

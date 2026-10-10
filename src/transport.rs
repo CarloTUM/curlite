@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use crate::body::ReadSeek;
 use crate::error::{Error, Result};
-use crate::request::{HttpVersion, Request, Upload};
+use crate::request::{Auth, HttpVersion, Request, Upload};
 use crate::response::{Response, process_header_line};
 
 /// Streaming transfers pause once this much body is buffered and not yet
@@ -327,6 +327,7 @@ pub(crate) fn start(
         hops += 1;
         if !same_origin(&request.url, &next) {
             request.headers.remove(AUTHORIZATION);
+            request.auth = None;
         }
         request.url = next;
     }
@@ -423,6 +424,26 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
         // "" advertises every encoding this libcurl can decode
         easy.accept_encoding("")?;
     }
+    if let Some(auth) = &request.auth {
+        let mut methods = curl::easy::Auth::new();
+        let credentials = match auth {
+            Auth::Basic { user, password } => Some((user, password, methods.basic(true))),
+            Auth::Digest { user, password } => Some((user, password, methods.digest(true))),
+            Auth::Ntlm { user, password } => Some((user, password, methods.ntlm(true))),
+            // libcurl only negotiates once a user is set, `-u :` in curl
+            Auth::Negotiate => Some((&String::new(), &String::new(), methods.gssnegotiate(true))),
+            // the header is added below
+            Auth::Bearer(_) => None,
+        };
+        if let Some((user, password, _)) = credentials {
+            easy.username(user)?;
+            easy.password(password)?;
+            easy.http_auth(&methods)?;
+        }
+    }
+    if request.netrc {
+        easy.netrc(curl::easy::NetRc::Optional)?;
+    }
     #[cfg(feature = "log")]
     if log::log_enabled!(target: "curlite", log::Level::Trace) {
         easy.verbose(true)?;
@@ -454,6 +475,11 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     }
 
     let mut header_list = curl::easy::List::new();
+    if let Some(Auth::Bearer(token)) = &request.auth
+        && !request.headers.contains_key(AUTHORIZATION)
+    {
+        header_list.append(&format!("Authorization: Bearer {token}"))?;
+    }
     let mut line = String::new();
     for (name, value) in &request.headers {
         let value = value.to_str()?.trim();

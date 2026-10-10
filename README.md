@@ -33,9 +33,10 @@ for part in response.parts()? {
 
 Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
 `multipart(..)` or, with the `json` feature, `json(&value)`; everything else
-(`query`, `header`, `stall_timeout`, `timeout`, `connect_timeout`,
-`follow_redirects`, `http_version`, `proxy`, `unix_socket`, `ca_bundle`,
-`compression`) is on the builder. `send()` reads the response into memory,
+(`query`, `header`, `basic_auth`, `bearer_auth`, `auth`, `netrc`,
+`stall_timeout`, `timeout`, `connect_timeout`, `follow_redirects`,
+`http_version`, `proxy`, `unix_socket`, `ca_bundle`, `compression`) is on the
+builder. `send()` reads the response into memory,
 `send_to(&mut writer)` streams it, `send_reader()` returns an `impl Read`
 that pulls from the connection with backpressure. Responses expose `url()`,
 `status()`, `headers()`, `body()`, `text()`, `json()`, `form()`, `parts()`
@@ -43,6 +44,11 @@ that pulls from the connection with backpressure. Responses expose `url()`,
 A `Client` holds headers, timeouts and connection settings shared by several
 requests, and `to_curl()` prints any request as a `curl` command line for
 logs and bug reports.
+
+Authentication is libcurl's: `Auth::Basic`, `Bearer`, `Digest`, `Negotiate`
+(Kerberos, with the ticket of the process) and `Ntlm`, and `netrc()` takes
+the credentials for a host from `~/.netrc`. Credentials, like an
+`Authorization` header, are dropped when a redirect leaves the origin.
 
 There is no total time limit by default. A transfer fails when nothing has
 moved for 30 seconds (`stall_timeout`) or the connection takes longer than 30
