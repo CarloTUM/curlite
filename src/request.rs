@@ -405,7 +405,10 @@ impl Request {
 
     /// Authenticates the TLS connection with a client certificate: PEM
     /// files with the certificate and the private key, which may be the
-    /// same file.
+    /// same file. On Windows, libcurl's Schannel backend does not read PEM
+    /// files; it wants a certificate from the system store or a PKCS#12
+    /// file, so there a `static-curl` build with OpenSSL or rustls is the
+    /// way to use this.
     pub fn client_cert(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
         self.client_cert = Some((cert.into(), key.into()));
         self

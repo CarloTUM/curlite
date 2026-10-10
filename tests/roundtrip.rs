@@ -874,8 +874,10 @@ fn stalled_transfer_times_out() {
         matches!(err, curlite::Error::Curl(ref e) if e.is_operation_timedout()),
         "{err:?}"
     );
+    // libcurl samples the speed once a second and wants a few samples,
+    // so the detection takes a few seconds, more on macOS than on Linux
     assert!(
-        start.elapsed() < Duration::from_secs(5),
+        start.elapsed() < Duration::from_secs(15),
         "{:?}",
         start.elapsed()
     );

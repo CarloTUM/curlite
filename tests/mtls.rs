@@ -28,9 +28,18 @@ fn client_certificate_is_presented() {
         eprintln!("no openssl binary, skipped");
         return;
     }
-    if curl::Version::get().ssl_version().is_none() {
-        eprintln!("libcurl without TLS, skipped");
-        return;
+    match curl::Version::get().ssl_version() {
+        None => {
+            eprintln!("libcurl without TLS, skipped");
+            return;
+        }
+        // Schannel takes certificates from the Windows store or a PKCS#12
+        // file, not from PEM files
+        Some(ssl) if ssl.starts_with("Schannel") => {
+            eprintln!("Schannel does not load PEM client certificates, skipped");
+            return;
+        }
+        Some(_) => {}
     }
     let dir = std::env::temp_dir().join(format!("curlite-mtls-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
