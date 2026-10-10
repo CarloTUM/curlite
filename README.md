@@ -163,6 +163,13 @@ Small also means few dependencies: besides `curl`, `curlite` uses `bytes`,
 `http`, `mime`, `form_urlencoded` and `thiserror`. URL parsing is libcurl's,
 multipart encoding and parsing are a few hundred lines in this crate.
 
+## Stability
+
+Minimum Rust 1.88 (edition 2024), tested in CI and raised only with a minor
+release. `cargo semver-checks` compares every push against the published
+API, and a [fuzz target](fuzz) runs the multipart parser, the one piece of
+curlite that parses bytes off the network, on every push.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

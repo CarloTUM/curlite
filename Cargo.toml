@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["http", "client", "curl", "blocking", "multipart"]
 categories = ["web-programming::http-client", "embedded"]
-exclude = ["/.github"]
+exclude = ["/.github", "/fuzz"]
 
 [features]
 # libcurl with the curl crate's default TLS backend (OpenSSL on Linux).
