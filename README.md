@@ -88,6 +88,7 @@ Debian 13) for one `GET` per process, CPU time and peak RSS:
 | `static-curl` + `rustls`, `AWS_LC_SYS_NO_JITTER_ENTROPY=1` | aws-lc | 5.5 ms, 3.0 MiB | 21 ms | 3.4 MiB |
 | `static-curl` + rustls on ring, non-PIE | ring | 4.7 ms, 2.6 MiB | 28 ms | 1.9 MiB |
 | same, static musl binary | ring | **3.0 ms, 1.1 MiB** | 26 ms | 2.0 MiB |
+| static musl, `rustls`, no jitter entropy | aws-lc | 3.3 ms, 1.4 MiB | **19 ms** | 3.3 MiB |
 | ureq 3 (rustls), for comparison | rustls | 4.3 ms, 2.4 MiB | 21 ms | 1.6 MiB |
 | minreq, for comparison | rustls | 3.5 ms, 2.1 MiB | 20 ms | 1.2 MiB |
 
@@ -122,6 +123,10 @@ rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"
 ```sh
 CC_aarch64_unknown_linux_musl=musl-gcc cargo build --release --target aarch64-unknown-linux-musl
 ```
+
+With `rustls` instead of `rustls-ring` (and `AWS_LC_SYS_NO_JITTER_ENTROPY=1`
+in the build environment) the same recipe gives the fastest HTTPS on the
+board, at the price of cmake at build time and 1.3 MiB more binary.
 
 The `rustls-ring` feature of the `curl` crate is not upstream yet; the
 [benchmark repository](https://github.com/CarloTUM/curlite-bench) carries
