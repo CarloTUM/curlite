@@ -6,6 +6,9 @@ pub enum Error {
     /// malformed URLs, which libcurl parses.
     #[error("curl error: {0}")]
     Curl(#[from] curl::Error),
+    /// libcurl's multi interface failed.
+    #[error("curl multi error: {0}")]
+    CurlMulti(#[from] curl::MultiError),
     #[error("invalid header name: {0}")]
     InvalidHeaderName(#[from] http::header::InvalidHeaderName),
     #[error("invalid header value: {0}")]
@@ -35,6 +38,16 @@ pub enum Error {
     TooManyRedirects(u32),
     #[error("body is not valid UTF-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+    /// A 4xx or 5xx response, from [`Response::error_for_status`]. The
+    /// response is kept for its body.
+    ///
+    /// [`Response::error_for_status`]: crate::Response::error_for_status
+    #[error("HTTP {}", .0.status())]
+    Status(Box<crate::Response>),
+    /// JSON serialization or parsing failed.
+    #[cfg(feature = "json")]
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Lets `Request::header` take a `HeaderName` or `HeaderValue` directly.

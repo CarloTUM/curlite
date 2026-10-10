@@ -17,22 +17,31 @@ Breaking:
 
 Added:
 
-- `Request::send_to(&mut writer)` streams the response body.
+- `Request::send_to(&mut writer)` streams the response body to a writer,
+  `Request::send_reader()` returns it as an `impl Read` with backpressure.
 - `Request::body_reader(mime, reader)` streams a request body from a
   `Read + Seek`.
-- `Request::connect_timeout`.
-- `Client`: headers, timeouts and redirect settings shared by requests.
+- `Request::connect_timeout`, `http_version`, `proxy`, `unix_socket`,
+  `ca_bundle`, `danger_accept_invalid_certs`, `compression` (on by default:
+  libcurl asks for and decodes compressed responses).
+- `Response::error_for_status` and `Error::Status`.
+- `Client`: headers, timeouts, redirect and connection settings shared by
+  requests.
+- Features `json` (`Request::json`, `Response::json`), `log` (libcurl's
+  verbose output as `log::trace!`) and `http2` (nghttp2 for static builds).
 - Re-export of `http::header`.
 
 Changed:
 
+- Transfers run on a per-thread libcurl multi handle, driven step by step;
+  the easy handle is reused across requests. Needs libcurl 7.68 or newer.
 - `multipart/form-data` requests are encoded by this crate and streamed part
   by part; part contents are no longer copied (libcurl's form API copied
   twice). `Response::parts` returns slices of the response buffer instead of
   copies. The `multipart_ng` dependency is gone.
 - The response buffer is sized from `Content-Length` before the first chunk.
-- A request sent from inside a `send_to` writer or `body_reader` reader, while
-  the thread's handle is busy, runs on a throwaway handle instead of panicking.
+- Writers and readers run between libcurl's steps, never inside its
+  callbacks, and may send requests of their own.
 - Part names and filenames in multipart responses may be non-ASCII and may
   contain `;` inside quotes.
 - CI runs on `master`.

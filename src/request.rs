@@ -4,12 +4,26 @@ use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT}
 use mime::Mime;
 
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::body::{Body, Multipart, ReadSeek, Segments, boundary, encode_form};
 use crate::error::{Error, Result};
 use crate::response::Response;
-use crate::transport::{self, Sink};
+use crate::transport::{self, ResponseReader};
+
+/// The HTTP version to ask libcurl for, see [`Request::http_version`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HttpVersion {
+    Http11,
+    /// HTTP/2 over TLS when the server offers it (ALPN), HTTP/1.1 otherwise.
+    Http2,
+    /// HTTP/2 without negotiation, also over plain TCP.
+    Http2PriorKnowledge,
+    /// HTTP/3 when the server offers it. Needs a libcurl built with it.
+    Http3,
+}
 
 /// A request under construction. Created with [`Request::new`], one of the
 /// free functions ([`get`], [`post`], ...) or a [`Client`], and sent with
@@ -40,13 +54,20 @@ pub struct Request {
     pub(crate) connect_timeout: Option<Duration>,
     pub(crate) follow_redirects: bool,
     pub(crate) max_redirects: u32,
+    pub(crate) http_version: Option<HttpVersion>,
+    pub(crate) proxy: Option<String>,
+    pub(crate) unix_socket: Option<PathBuf>,
+    pub(crate) ca_bundle: Option<PathBuf>,
+    pub(crate) verify_tls: bool,
+    pub(crate) compression: bool,
     /// First error from a builder method, returned by `send`.
     error: Option<Error>,
 }
 
 /// A request body ready for libcurl.
 pub(crate) struct Upload {
-    pub(crate) source: Box<dyn ReadSeek>,
+    /// Moved into the transfer's handler while it runs.
+    pub(crate) source: Option<Box<dyn ReadSeek>>,
     pub(crate) len: u64,
 }
 
@@ -66,6 +87,12 @@ impl Request {
             connect_timeout: None,
             follow_redirects: true,
             max_redirects: 10,
+            http_version: None,
+            proxy: None,
+            unix_socket: None,
+            ca_bundle: None,
+            verify_tls: true,
+            compression: true,
             error: None,
         }
     }
@@ -140,6 +167,20 @@ impl Request {
         self
     }
 
+    /// Sends `value` serialized as JSON with `application/json`, unless a
+    /// `Content-Type` header was set explicitly. A serialization error is
+    /// returned from `send`.
+    #[cfg(feature = "json")]
+    pub fn json<T: serde::Serialize + ?Sized>(mut self, value: &T) -> Self {
+        match serde_json::to_vec(value) {
+            Ok(data) => self.body(mime::APPLICATION_JSON, data),
+            Err(e) => {
+                self.record(e.into());
+                self
+            }
+        }
+    }
+
     /// Sends `pairs` as an `application/x-www-form-urlencoded` body.
     pub fn form<'a>(mut self, pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         self.body = Body::Form(encode_form(pairs));
@@ -186,29 +227,85 @@ impl Request {
         self
     }
 
+    /// The HTTP version to use. By default libcurl decides: HTTP/2 over TLS
+    /// when it was built with HTTP/2 and the server offers it, HTTP/1.1
+    /// otherwise.
+    pub fn http_version(mut self, version: HttpVersion) -> Self {
+        self.http_version = Some(version);
+        self
+    }
+
+    /// Sends the request through `proxy`, such as `http://proxy:3128` or
+    /// `socks5h://localhost:1080`. Without this, libcurl honours the
+    /// `http_proxy`, `https_proxy`, `all_proxy` and `no_proxy` environment
+    /// variables.
+    pub fn proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
+        self
+    }
+
+    /// Connects to a Unix domain socket instead of the URL's host, which is
+    /// still sent as `Host`. For Docker, systemd and similar local APIs.
+    pub fn unix_socket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.unix_socket = Some(path.into());
+        self
+    }
+
+    /// A PEM file with the CA certificates to trust, instead of the system
+    /// store.
+    pub fn ca_bundle(mut self, path: impl Into<PathBuf>) -> Self {
+        self.ca_bundle = Some(path.into());
+        self
+    }
+
+    /// Skips TLS certificate and host name verification. For development
+    /// against self-signed certificates only.
+    pub fn danger_accept_invalid_certs(mut self) -> Self {
+        self.verify_tls = false;
+        self
+    }
+
+    /// Whether to ask for compressed responses (`Accept-Encoding` with every
+    /// encoding this libcurl can decode) and decode them transparently,
+    /// default `true`. Off, the raw body is returned.
+    pub fn compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
+        self
+    }
+
     /// Performs the request and reads the whole response into memory.
     ///
-    /// Requests on the same thread share one libcurl handle, so connections
-    /// to the same host are reused across calls. A request sent while that
-    /// handle is busy, from inside a [`Request::send_to`] writer or a
-    /// [`Request::body_reader`] reader, uses a handle of its own.
-    pub fn send(self) -> Result<Response> {
-        self.send_with(Sink::Memory)
+    /// Requests on the same thread share one connection cache, so calls to
+    /// the same host reuse the connection.
+    pub fn send(mut self) -> Result<Response> {
+        let upload = self.prepare()?;
+        transport::send(self, upload)
     }
 
     /// Performs the request and writes the response body to `writer` as it
     /// arrives, instead of holding it in memory. The returned response has
     /// an empty body. Bodies of redirects that are followed are discarded.
-    pub fn send_to(self, writer: &mut dyn Write) -> Result<Response> {
-        self.send_with(Sink::Writer(writer))
+    ///
+    /// The writer runs between libcurl's steps, never inside its callbacks,
+    /// so it may send requests of its own.
+    pub fn send_to(mut self, writer: &mut dyn Write) -> Result<Response> {
+        let upload = self.prepare()?;
+        transport::send_to(self, upload, writer)
     }
 
-    fn send_with(mut self, sink: Sink<'_>) -> Result<Response> {
+    /// Performs the request up to the response headers and returns the body
+    /// as a reader that pulls from the connection on demand, with
+    /// backpressure.
+    pub fn send_reader(mut self) -> Result<ResponseReader> {
+        let upload = self.prepare()?;
+        ResponseReader::new(self, upload)
+    }
+
+    fn prepare(&mut self) -> Result<Option<Upload>> {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
-        let upload = self.prepare_body()?;
-        transport::perform(self, upload, sink)
+        self.prepare_body()
     }
 
     /// The URL the request will be sent to, including query parameters.
@@ -267,7 +364,7 @@ impl Request {
                 let len = reader.seek(SeekFrom::End(0))?;
                 reader.seek(SeekFrom::Start(0))?;
                 Some(Upload {
-                    source: reader,
+                    source: Some(reader),
                     len,
                 })
             }
@@ -281,7 +378,7 @@ impl Upload {
         let segments = Segments::new(parts);
         Upload {
             len: segments.len(),
-            source: Box::new(segments),
+            source: Some(Box::new(segments)),
         }
     }
 }
@@ -366,7 +463,12 @@ mod tests {
     fn read_all(upload: Option<Upload>) -> (u64, Vec<u8>) {
         let mut upload = upload.expect("a body");
         let mut out = Vec::new();
-        upload.source.read_to_end(&mut out).unwrap();
+        upload
+            .source
+            .as_mut()
+            .unwrap()
+            .read_to_end(&mut out)
+            .unwrap();
         (upload.len, out)
     }
 

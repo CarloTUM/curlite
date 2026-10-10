@@ -4,11 +4,14 @@
 [![crates.io](https://img.shields.io/crates/v/curlite.svg)](https://crates.io/crates/curlite)
 [![docs.rs](https://docs.rs/curlite/badge.svg)](https://docs.rs/curlite)
 
-A small blocking HTTP client on top of libcurl. For programs that call HTTP
-services and want to stay small: no async runtime, one libcurl handle per
-thread with connection reuse, request bodies held in memory once (or streamed
-from a file), response bodies in memory once (or streamed to a writer), and
-`multipart/form-data` in both directions without copying the parts.
+A small blocking HTTP client on top of libcurl, for short-lived processes:
+CLI tools, hooks, cron jobs, plugins and small devices, where an async
+runtime per invocation is pure overhead. No runtime, one connection cache
+per thread, request bodies held in memory once (or streamed from a file),
+response bodies in memory once (or streamed), `multipart/form-data` in both
+directions without copying the parts, and everything libcurl already does:
+HTTP/2, proxies from the environment, Unix sockets, the system certificate
+store, transparent decompression.
 
 ```rust
 use curlite::Multipart;
@@ -28,13 +31,24 @@ for part in response.parts()? {
 }
 ```
 
-Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)` or
-`multipart(..)`; everything else (`query`, `header`, `timeout`,
-`connect_timeout`, `follow_redirects`) is on the builder. `send()` reads the
-response into memory, `send_to(&mut writer)` streams it. Responses expose
-`status()`, `headers()`, `body()`, `text()`, `form()` and `parts()`, where
-multipart parts are slices of the response buffer. A `Client` holds headers
-and timeouts shared by several requests.
+Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
+`multipart(..)` or, with the `json` feature, `json(&value)`; everything else
+(`query`, `header`, `timeout`, `connect_timeout`, `follow_redirects`,
+`http_version`, `proxy`, `unix_socket`, `ca_bundle`, `compression`) is on
+the builder. `send()` reads the response into memory, `send_to(&mut writer)`
+streams it, `send_reader()` returns an `impl Read` that pulls from the
+connection with backpressure. Responses expose `status()`, `headers()`,
+`body()`, `text()`, `json()`, `form()`, `parts()` (multipart parts as slices
+of the response buffer) and `error_for_status()`. A `Client` holds headers,
+timeouts and connection settings shared by several requests.
+
+```rust
+let api = curlite::Client::new()
+    .header(curlite::header::USER_AGENT, curlite::HeaderValue::from_static("tool/1.0"))
+    .timeout(std::time::Duration::from_secs(10));
+let mut file = std::fs::File::create("big.iso")?;
+api.get("https://example.com/big.iso").send_to(&mut file)?;
+```
 
 Redirects are followed by `curlite` itself, with the verb handling of RFC
 9110: `303` turns any method into `GET`, `301`/`302` do so for `POST`,
@@ -58,6 +72,15 @@ Fedora, `curl-dev` on Alpine, `curl` from Homebrew); without it, the
 source and links it statically against the system OpenSSL. The `static-curl`,
 `static-ssl` and `rustls` features are passed through to the `curl` crate to
 ask for a static build explicitly.
+
+## How it runs
+
+Each thread owns one libcurl multi handle, which holds the connection cache,
+and one easy handle that is reused from request to request. A request is
+driven step by step, so a `send_reader()` body is pulled from the socket on
+demand and libcurl pauses the transfer when 128 KiB are buffered and not yet
+read. Writers and readers run between those steps, never inside libcurl's
+callbacks, so they may send requests of their own.
 
 ## Why libcurl
 

@@ -15,19 +15,30 @@ exclude = ["/.github"]
 default = []
 # `Parameter` and friends implement `serde::Serialize`
 serde = ["dep:serde"]
+# `Request::json` and `Response::json`
+json = ["dep:serde", "dep:serde_json"]
+# libcurl's verbose output as `log::trace!` records with target "curlite"
+log = ["dep:log"]
 # Pass-through of the curl crate's linking features. Default stays dynamic.
+# `http2` adds nghttp2 to a static build; a system libcurl brings its own.
+http2 = ["curl/http2"]
 static-curl = ["curl/static-curl"]
 static-ssl = ["curl/static-ssl"]
 rustls = ["curl/rustls", "curl/static-curl"]
 
 [dependencies]
 bytes = "1"
-curl = "0.4"
+curl = { version = "0.4", features = ["poll_7_68_0"] }
 form_urlencoded = "1"
 http = "1"
 mime = "0.3"
+log = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 thiserror = "2"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

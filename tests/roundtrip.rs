@@ -6,6 +6,7 @@ use curlite::{Multipart, StatusCode};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 /// What the server saw.
 #[derive(Debug)]
@@ -485,4 +486,363 @@ fn nested_request_from_a_writer_does_not_panic() {
     assert_eq!(sink.1, b"innerouter");
     outer.join().unwrap();
     inner.join().unwrap();
+}
+
+#[test]
+fn send_reader_pulls_a_large_body_with_backpressure() {
+    // well above the 128 KiB pause threshold, so the transfer pauses and
+    // resumes several times while the reader drains it in small pieces
+    let payload: Vec<u8> = (0..2_000_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let (url, server) = serve(vec![response(
+        "200 OK",
+        &[("Content-Type", "application/octet-stream")],
+        &payload,
+    )]);
+    let mut reader = curlite::get(&url).send_reader().unwrap();
+    assert_eq!(reader.status(), StatusCode::OK);
+    assert_eq!(
+        reader.content_type().unwrap().unwrap(),
+        mime::APPLICATION_OCTET_STREAM
+    );
+    let mut out = Vec::new();
+    let mut buf = [0u8; 7_000];
+    loop {
+        let n = reader.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(out.len(), payload.len());
+    assert!(out == payload);
+    server.join().unwrap();
+}
+
+#[test]
+fn send_reader_into_response_and_early_drop() {
+    let (url, server) = serve(vec![response("200 OK", &[], b"abcdef")]);
+    let mut reader = curlite::get(&url).send_reader().unwrap();
+    let mut first = [0u8; 2];
+    reader.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"ab");
+    let resp = reader.into_response().unwrap();
+    assert_eq!(resp.text().unwrap(), "cdef");
+    server.join().unwrap();
+
+    // dropping a reader mid-body cancels the transfer; the next request on
+    // the thread still works
+    let big = vec![b'z'; 1_000_000];
+    let (url, server) = serve(vec![response("200 OK", &[], &big)]);
+    let reader = curlite::get(&url).send_reader().unwrap();
+    assert_eq!(reader.status(), StatusCode::OK);
+    drop(reader);
+    drop(server);
+    let (url, server) = serve(vec![response("200 OK", &[], b"after")]);
+    assert_eq!(curlite::get(&url).send().unwrap().text().unwrap(), "after");
+    server.join().unwrap();
+}
+
+#[test]
+fn send_to_large_body_streams_in_pieces() {
+    let payload = vec![b'q'; 1_500_000];
+    let (url, server) = serve(vec![response("200 OK", &[], &payload)]);
+    struct Counting(usize, usize);
+    impl Write for Counting {
+        fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+            self.0 += chunk.len();
+            self.1 += 1;
+            Ok(chunk.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut sink = Counting(0, 0);
+    curlite::get(&url).send_to(&mut sink).unwrap();
+    assert_eq!(sink.0, payload.len());
+    assert!(sink.1 > 1, "expected several writes, got {}", sink.1);
+    server.join().unwrap();
+}
+
+#[test]
+fn error_for_status_keeps_the_response() {
+    let (url, server) = serve(vec![
+        response("200 OK", &[], b"fine"),
+        response("503 Service Unavailable", &[], b"later"),
+    ]);
+    let ok = curlite::get(&url)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(ok.text().unwrap(), "fine");
+    let err = curlite::get(&url)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap_err();
+    assert_eq!(err.to_string(), "HTTP 503 Service Unavailable");
+    let curlite::Error::Status(resp) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(resp.text().unwrap(), "later");
+    server.join().unwrap();
+}
+
+#[test]
+fn compression_is_advertised_unless_disabled() {
+    let (url, server) = serve(vec![
+        response("200 OK", &[], b""),
+        response("200 OK", &[], b""),
+    ]);
+    curlite::get(&url).send().unwrap();
+    curlite::get(&url).compression(false).send().unwrap();
+    let received = server.join().unwrap();
+    assert!(
+        received[0]
+            .header("accept-encoding")
+            .is_some_and(|v| v.contains("gzip")),
+        "{:?}",
+        received[0].headers
+    );
+    assert_eq!(received[1].header("accept-encoding"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_socket_requests() {
+    use std::os::unix::net::UnixListener;
+    let dir = std::env::temp_dir().join(format!("curlite-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("api.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&mut conn);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut host = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(h) = line.strip_prefix("Host: ") {
+                host = Some(h.to_owned());
+            }
+        }
+        conn.write_all(response("200 OK", &[], b"via socket").as_bytes())
+            .unwrap();
+        (request_line.trim_end().to_owned(), host)
+    });
+    let resp = curlite::get("http://docker/v1/info")
+        .unix_socket(&path)
+        .send()
+        .unwrap();
+    assert_eq!(resp.text().unwrap(), "via socket");
+    let (request_line, host) = server.join().unwrap();
+    assert_eq!(request_line, "GET /v1/info HTTP/1.1");
+    assert_eq!(host.as_deref(), Some("docker"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn json_round_trip() {
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Item {
+        id: u32,
+        name: String,
+    }
+    let (url, server) = serve(vec![response(
+        "200 OK",
+        &[("Content-Type", "application/json")],
+        br#"{"id":7,"name":"seven"}"#,
+    )]);
+    let item: Item = curlite::post(&url)
+        .json(&Item {
+            id: 1,
+            name: "one".to_owned(),
+        })
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(item.id, 7);
+    assert_eq!(item.name, "seven");
+    let received = server.join().unwrap().remove(0);
+    assert_eq!(received.header("content-type"), Some("application/json"));
+    assert_eq!(received.body, br#"{"id":1,"name":"one"}"#);
+}
+
+#[test]
+fn two_transfers_on_one_thread_complete_independently() {
+    // an open reader (paused, body > 128 KiB) must not stall or truncate a
+    // second request on the same thread, and vice versa
+    let big = vec![b'r'; 600_000];
+    let (url_a, server_a) = serve(vec![response("200 OK", &[], &big)]);
+    let (url_b, server_b) = serve(vec![response("200 OK", &[], b"other")]);
+    let mut reader = curlite::get(&url_a).send_reader().unwrap();
+    let started = std::time::Instant::now();
+    let other = curlite::get(&url_b)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .unwrap();
+    assert_eq!(other.text().unwrap(), "other");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    let mut out = Vec::new();
+    reader.read_to_end(&mut out).unwrap();
+    assert_eq!(out.len(), big.len());
+    server_a.join().unwrap();
+    server_b.join().unwrap();
+
+    // a short response finishing while another request runs keeps its own
+    // result: the truncation below is still reported
+    let partial = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: 400000\r\nConnection: close\r\n\r\n{}",
+        "p".repeat(200_000)
+    );
+    let (url_a, server_a) = serve(vec![partial]);
+    let (url_b, server_b) = serve(vec![response("200 OK", &[], b"x")]);
+    let mut reader = curlite::get(&url_a).send_reader().unwrap();
+    drop(server_a);
+    thread::sleep(Duration::from_millis(100));
+    curlite::get(&url_b).send().unwrap();
+    server_b.join().unwrap();
+    let mut out = Vec::new();
+    let err = reader.read_to_end(&mut out).unwrap_err();
+    assert!(err.to_string().contains("curl"), "{err}");
+}
+
+#[test]
+fn large_redirect_body_is_discarded_in_stream_mode() {
+    let interstitial = vec![b'<'; 300_000];
+    let (url, server) = serve(vec![
+        response("302 Found", &[("Location", "/x")], &interstitial),
+        response("200 OK", &[], b"landed"),
+    ]);
+    let mut out = Vec::new();
+    let resp = curlite::get(&url)
+        .timeout(Duration::from_secs(3))
+        .send_to(&mut out)
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(out, b"landed");
+    server.join().unwrap();
+}
+
+#[test]
+fn body_reader_may_send_requests_on_every_read() {
+    struct Lazy {
+        url: String,
+        pos: u64,
+        chunks: u64,
+    }
+    impl Read for Lazy {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.chunks {
+                return Ok(0);
+            }
+            let r = curlite::get(&self.url)
+                .send()
+                .map_err(std::io::Error::other)?;
+            let piece = r.body();
+            buf[..piece.len()].copy_from_slice(piece);
+            self.pos += 1;
+            Ok(piece.len())
+        }
+    }
+    impl std::io::Seek for Lazy {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            match pos {
+                std::io::SeekFrom::End(0) => Ok(self.chunks * 5),
+                std::io::SeekFrom::Start(0) => {
+                    self.pos = 0;
+                    Ok(0)
+                }
+                _ => Err(std::io::Error::other("unsupported")),
+            }
+        }
+    }
+    let (inner_url, inner) = serve(vec![response("200 OK", &[], b"piece"); 3]);
+    let (url, server) = serve(vec![response("201 Created", &[], b"")]);
+    curlite::put(&url)
+        .body_reader(
+            mime::TEXT_PLAIN,
+            Lazy {
+                url: inner_url,
+                pos: 0,
+                chunks: 3,
+            },
+        )
+        .send()
+        .unwrap();
+    let received = server.join().unwrap().remove(0);
+    assert_eq!(received.body, b"piecepiecepiece");
+    assert_eq!(inner.join().unwrap().len(), 3);
+}
+
+#[test]
+fn panic_in_body_reader_propagates_and_the_thread_recovers() {
+    struct Boom;
+    impl Read for Boom {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("reader exploded");
+        }
+    }
+    impl std::io::Seek for Boom {
+        fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+            Ok(100)
+        }
+    }
+    let (url, server) = serve(vec![response("200 OK", &[], b"")]);
+    let result = std::panic::catch_unwind(|| {
+        curlite::put(&url)
+            .body_reader(mime::TEXT_PLAIN, Boom)
+            .send()
+    });
+    let payload = result.unwrap_err();
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"reader exploded"));
+    drop(server);
+    let (url, server) = serve(vec![response("200 OK", &[], b"fine")]);
+    assert_eq!(curlite::get(&url).send().unwrap().text().unwrap(), "fine");
+    server.join().unwrap();
+}
+
+#[test]
+fn streamed_chunks_arrive_without_delay() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        read_request(&mut conn).unwrap();
+        conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .unwrap();
+        for i in 0..3 {
+            thread::sleep(Duration::from_millis(150));
+            conn.write_all(format!("6\r\nchunk{i}\r\n").as_bytes())
+                .unwrap();
+        }
+        conn.write_all(b"0\r\n\r\n").unwrap();
+    });
+    let mut reader = curlite::get(&url).send_reader().unwrap();
+    let mut buf = [0u8; 64];
+    let t = std::time::Instant::now();
+    let n = reader.read(&mut buf).unwrap();
+    let elapsed = t.elapsed();
+    assert_eq!(&buf[..n], b"chunk0");
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "first chunk took {elapsed:?}"
+    );
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).unwrap();
+    assert_eq!(rest, b"chunk1chunk2");
+    server.join().unwrap();
 }

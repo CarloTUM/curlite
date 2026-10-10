@@ -27,11 +27,21 @@
 //! [`Request::body_reader`] (streamed from a file or other reader),
 //! [`Request::form`] (`application/x-www-form-urlencoded`) or
 //! [`Request::multipart`]. Responses are read into memory by
-//! [`Request::send`] or streamed to a writer by [`Request::send_to`].
-//! Multipart responses are split with [`Response::parts`]. A [`Client`]
-//! holds headers and timeouts shared by several requests, and the [`params`]
+//! [`Request::send`], streamed to a writer by [`Request::send_to`] or read
+//! on demand through [`Request::send_reader`]. Multipart responses are
+//! split with [`Response::parts`]. A [`Client`] holds headers, timeouts,
+//! proxy and TLS settings shared by several requests, and the [`params`]
 //! module adds a parameter model in which the body format follows from the
 //! parameters.
+//!
+//! # Features
+//!
+//! * `json`: [`Request::json`] and [`Response::json`] via `serde_json`.
+//! * `serde`: the [`params`] types implement `serde::Serialize`.
+//! * `log`: libcurl's verbose output as `log::trace!` records with target
+//!   `curlite`, when that level is enabled.
+//! * `static-curl`, `static-ssl`, `rustls`: passed through to the [`curl`]
+//!   crate, see below.
 //!
 //! # TLS
 //!
@@ -54,8 +64,9 @@ mod transport;
 pub use body::Multipart;
 pub use client::Client;
 pub use error::{Error, Result};
-pub use request::{Request, delete, get, head, patch, post, put};
+pub use request::{HttpVersion, Request, delete, get, head, patch, post, put};
 pub use response::{Response, ResponsePart};
+pub use transport::ResponseReader;
 
 pub use bytes::Bytes;
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};

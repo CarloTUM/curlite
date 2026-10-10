@@ -78,6 +78,22 @@ impl Response {
         parse_multipart(&self.body, boundary.as_str())
     }
 
+    /// Turns a 4xx or 5xx status into [`Error::Status`], which keeps the
+    /// response.
+    pub fn error_for_status(self) -> Result<Self> {
+        if self.status.is_client_error() || self.status.is_server_error() {
+            Err(Error::Status(Box::new(self)))
+        } else {
+            Ok(self)
+        }
+    }
+
+    /// Parses the body as JSON.
+    #[cfg(feature = "json")]
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
+        Ok(serde_json::from_slice(&self.body)?)
+    }
+
     /// Parses an `application/x-www-form-urlencoded` body into pairs.
     pub fn form(&self) -> Vec<(String, String)> {
         form_urlencoded::parse(&self.body)

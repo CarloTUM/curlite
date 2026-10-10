@@ -1,9 +1,10 @@
 use http::Method;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::request::Request;
+use crate::request::{HttpVersion, Request};
 
 /// Defaults shared by several requests: headers, timeouts and redirect
 /// handling. Requests built from a client start with these values and can
@@ -31,6 +32,12 @@ pub struct Client {
     connect_timeout: Option<Duration>,
     follow_redirects: bool,
     max_redirects: u32,
+    http_version: Option<HttpVersion>,
+    proxy: Option<String>,
+    unix_socket: Option<PathBuf>,
+    ca_bundle: Option<PathBuf>,
+    verify_tls: bool,
+    compression: bool,
 }
 
 impl Default for Client {
@@ -42,6 +49,12 @@ impl Default for Client {
             connect_timeout: defaults.connect_timeout,
             follow_redirects: defaults.follow_redirects,
             max_redirects: defaults.max_redirects,
+            http_version: defaults.http_version,
+            proxy: defaults.proxy,
+            unix_socket: defaults.unix_socket,
+            ca_bundle: defaults.ca_bundle,
+            verify_tls: defaults.verify_tls,
+            compression: defaults.compression,
         }
     }
 }
@@ -84,6 +97,42 @@ impl Client {
         self
     }
 
+    /// See [`Request::http_version`].
+    pub fn http_version(mut self, version: HttpVersion) -> Self {
+        self.http_version = Some(version);
+        self
+    }
+
+    /// See [`Request::proxy`].
+    pub fn proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
+        self
+    }
+
+    /// See [`Request::unix_socket`].
+    pub fn unix_socket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.unix_socket = Some(path.into());
+        self
+    }
+
+    /// See [`Request::ca_bundle`].
+    pub fn ca_bundle(mut self, path: impl Into<PathBuf>) -> Self {
+        self.ca_bundle = Some(path.into());
+        self
+    }
+
+    /// See [`Request::danger_accept_invalid_certs`].
+    pub fn danger_accept_invalid_certs(mut self) -> Self {
+        self.verify_tls = false;
+        self
+    }
+
+    /// See [`Request::compression`].
+    pub fn compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
+        self
+    }
+
     /// Starts a request with this client's defaults.
     pub fn request(&self, method: Method, url: &str) -> Request {
         let mut request = Request::new(method, url);
@@ -92,6 +141,12 @@ impl Client {
         request.connect_timeout = self.connect_timeout;
         request.follow_redirects = self.follow_redirects;
         request.max_redirects = self.max_redirects;
+        request.http_version = self.http_version;
+        request.proxy = self.proxy.clone();
+        request.unix_socket = self.unix_socket.clone();
+        request.ca_bundle = self.ca_bundle.clone();
+        request.verify_tls = self.verify_tls;
+        request.compression = self.compression;
         request
     }
 
@@ -136,7 +191,13 @@ mod tests {
             .timeout(Duration::from_secs(3))
             .connect_timeout(Duration::from_secs(1))
             .follow_redirects(false)
-            .max_redirects(2);
+            .max_redirects(2)
+            .http_version(HttpVersion::Http11)
+            .proxy("http://proxy:3128")
+            .unix_socket("/run/x.sock")
+            .ca_bundle("/etc/ca.pem")
+            .danger_accept_invalid_certs()
+            .compression(false);
         let req = client.post("http://localhost").header("X-A", "2");
         assert_eq!(req.method, Method::POST);
         assert_eq!(req.headers[USER_AGENT], "client");
@@ -145,5 +206,17 @@ mod tests {
         assert_eq!(req.connect_timeout, Some(Duration::from_secs(1)));
         assert!(!req.follow_redirects);
         assert_eq!(req.max_redirects, 2);
+        assert_eq!(req.http_version, Some(HttpVersion::Http11));
+        assert_eq!(req.proxy.as_deref(), Some("http://proxy:3128"));
+        assert_eq!(
+            req.unix_socket.as_deref(),
+            Some(std::path::Path::new("/run/x.sock"))
+        );
+        assert_eq!(
+            req.ca_bundle.as_deref(),
+            Some(std::path::Path::new("/etc/ca.pem"))
+        );
+        assert!(!req.verify_tls);
+        assert!(!req.compression);
     }
 }
