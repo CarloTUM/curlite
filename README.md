@@ -218,7 +218,9 @@ multipart encoding and parsing are a few hundred lines in this crate.
 Minimum Rust 1.88 (edition 2024), tested in CI and raised only with a minor
 release. `cargo semver-checks` compares every push against the published
 API, and a [fuzz target](fuzz) runs the multipart parser, the one piece of
-curlite that parses bytes off the network, on every push.
+curlite that parses bytes off the network, on every push. TLS client
+authentication is tested end to end against `openssl s_server`, on the
+OpenSSL and the rustls backend.
 
 ## License
 
