@@ -104,6 +104,10 @@ On the response: `url` (after redirects), `status`, `headers`, `body` (a
 `Bytes`), `text`, `json`, `form`, `parts` (multipart, borrowing the buffer),
 `error_for_status`.
 
+Three small programs in [`examples/`](examples) show a download with a
+progress line, an intranet fetch with Kerberos and `~/.netrc` that prints the
+curl command on failure, and a multipart upload.
+
 ```rust
 let api = curlite::Client::new()
     .header(curlite::header::USER_AGENT, curlite::HeaderValue::from_static("tool/1.0"))
