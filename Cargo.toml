@@ -12,7 +12,11 @@ categories = ["web-programming::http-client", "embedded"]
 exclude = ["/.github"]
 
 [features]
-default = []
+# libcurl with the curl crate's default TLS backend (OpenSSL on Linux).
+# `default-features = false` plus `rustls` builds without any OpenSSL
+# dependency, which a static musl build needs.
+default = ["ssl"]
+ssl = ["curl/ssl"]
 # `Parameter` and friends implement `serde::Serialize`
 serde = ["dep:serde"]
 # `Request::json` and `Response::json`
@@ -28,7 +32,7 @@ rustls = ["curl/rustls", "curl/static-curl"]
 
 [dependencies]
 bytes = "1"
-curl = { version = "0.4", features = ["poll_7_68_0"] }
+curl = { version = "0.4", default-features = false, features = ["poll_7_68_0"] }
 form_urlencoded = "1"
 http = "1"
 mime = "0.3"

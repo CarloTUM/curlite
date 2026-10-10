@@ -73,6 +73,41 @@ source and links it statically against the system OpenSSL. The `static-curl`,
 `static-ssl` and `rustls` features are passed through to the `curl` crate to
 ask for a static build explicitly.
 
+## Building for small processes
+
+What a short-lived process pays before its first byte is decided by the
+build, not by this crate. Measured on an Orange Pi Zero 2W (Cortex-A53,
+Debian 13) for one `GET` per process, CPU time and peak RSS:
+
+| libcurl | TLS | plain HTTP | HTTPS | binary |
+|---|---|---|---|---|
+| system (`libcurl4`, 34 shared libraries) | OpenSSL 3, dynamic | 36.7 ms, 12.0 MiB | 75 ms | 0.5 MiB |
+| `static-curl` | OpenSSL 3, dynamic | 17.0 ms, 6.9 MiB | 55 ms | 1.1 MiB |
+| `static-curl` + `static-ssl` | OpenSSL 3, static | 10.4 ms, 5.5 MiB | 48 ms | 6.2 MiB |
+| `static-curl` + `rustls` | aws-lc, jitter entropy on | 5.9 ms, 3.0 MiB | **433 ms** | 3.4 MiB |
+| `static-curl` + `rustls`, `AWS_LC_SYS_NO_JITTER_ENTROPY=1` | aws-lc | 5.5 ms, 3.0 MiB | 21 ms | 3.4 MiB |
+| `static-curl` + rustls on ring, non-PIE | ring | 4.7 ms, 2.6 MiB | 28 ms | 1.9 MiB |
+
+An empty C program costs 2.1 ms and 0.7 MiB on that board. The lessons:
+
+- **The TLS library is the cost, not the HTTP client.** OpenSSL 3 spends
+  about 8 ms of CPU and 4.7 MiB on its own initialisation, which libcurl
+  runs even for plain HTTP. With rustls that work disappears.
+- **aws-lc's CPU jitter entropy** (rustls-ffi's default crypto provider)
+  burns hundreds of milliseconds per process on a slow core seeding its
+  RNG. Build with `AWS_LC_SYS_NO_JITTER_ENTROPY=1`, or use ring.
+- **The distro libcurl drags in everything** it was built with: on Debian
+  that is GnuTLS via librtmp, Kerberos, LDAP, libssh2 and more, 34 shared
+  objects and 57 000 relocations per process start. `static-curl` builds a
+  libcurl that knows HTTP(S) and nothing else.
+- `-C relocation-model=static` (no PIE) removes the executable's own
+  relocations; a static musl build removes the dynamic loader entirely.
+
+The rustls-on-ring configuration needs a `rustls-ring` feature in the
+`curl` crate that is not upstream yet; the
+[benchmark repository](https://github.com/CarloTUM/curlite-bench) carries
+the patch and the measurement scripts.
+
 ## How it runs
 
 Each thread owns one libcurl multi handle, which holds the connection cache,

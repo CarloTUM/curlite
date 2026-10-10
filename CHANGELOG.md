@@ -29,6 +29,8 @@ Added:
   requests.
 - Features `json` (`Request::json`, `Response::json`), `log` (libcurl's
   verbose output as `log::trace!`) and `http2` (nghttp2 for static builds).
+- Feature `ssl` (default) carries the curl crate's OpenSSL backend; with
+  `default-features = false` and `rustls` nothing OpenSSL is built.
 - Re-export of `http::header`.
 
 Changed:
