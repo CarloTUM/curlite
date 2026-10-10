@@ -24,10 +24,14 @@
 //! ```
 //!
 //! Bodies are set with [`Request::body`] (raw bytes with a MIME type),
+//! [`Request::body_reader`] (streamed from a file or other reader),
 //! [`Request::form`] (`application/x-www-form-urlencoded`) or
-//! [`Request::multipart`]. Multipart responses are split with
-//! [`Response::parts`]. The [`params`] module adds a parameter model in
-//! which the body format follows from the parameters.
+//! [`Request::multipart`]. Responses are read into memory by
+//! [`Request::send`] or streamed to a writer by [`Request::send_to`].
+//! Multipart responses are split with [`Response::parts`]. A [`Client`]
+//! holds headers and timeouts shared by several requests, and the [`params`]
+//! module adds a parameter model in which the body format follows from the
+//! parameters.
 //!
 //! # TLS
 //!
@@ -40,6 +44,7 @@
 #![warn(missing_debug_implementations)]
 
 mod body;
+mod client;
 mod error;
 pub mod params;
 mod request;
@@ -47,10 +52,11 @@ mod response;
 mod transport;
 
 pub use body::Multipart;
+pub use client::Client;
 pub use error::{Error, Result};
 pub use request::{Request, delete, get, head, patch, post, put};
 pub use response::{Response, ResponsePart};
 
 pub use bytes::Bytes;
-pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 pub use mime::Mime;

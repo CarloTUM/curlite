@@ -186,9 +186,9 @@ fn body_from_parameters(headers: &HeaderMap, mut parameters: Vec<Parameter>) -> 
 impl Response {
     /// Parses the body into parameters, see the [module documentation](self).
     ///
-    /// A flat body is returned as one complex parameter sharing the response
-    /// buffer, multipart and form bodies are split into one parameter per
-    /// part or pair.
+    /// A flat body is returned as one complex parameter, multipart and form
+    /// bodies are split into one parameter per part or pair. Complex
+    /// parameters share the response buffer.
     pub fn parameters(&self) -> Result<Vec<Parameter>> {
         let name = match self.headers.get("content-id") {
             Some(id) => id.to_str()?.trim().replace('"', ""),
@@ -264,7 +264,7 @@ mod tests {
             Parameter::query("c", ""),
             Parameter::body("a", "a1"),
         ]);
-        assert_eq!(req.url().unwrap().as_str(), "http://localhost/?x=1&b=b+1&c");
+        assert_eq!(req.url(), "http://localhost/?x=1&b=b+1&c");
     }
 
     #[test]

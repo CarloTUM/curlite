@@ -302,3 +302,187 @@ fn invalid_response_header_is_an_error() {
     );
     server.join().unwrap();
 }
+
+#[test]
+fn redirect_303_turns_post_into_get_without_body() {
+    let (url, server) = serve(vec![
+        response("303 See Other", &[("Location", "/done")], b""),
+        response("200 OK", &[], b"ok"),
+    ]);
+    let resp = curlite::post(&url).form([("a", "1")]).send().unwrap();
+    assert_eq!(resp.text().unwrap(), "ok");
+    let received = server.join().unwrap();
+    assert_eq!(received[0].request_line, "POST / HTTP/1.1");
+    assert_eq!(received[0].body, b"a=1");
+    assert_eq!(received[1].request_line, "GET /done HTTP/1.1");
+    assert_eq!(received[1].header("content-type"), None);
+    assert_eq!(received[1].header("content-length"), None);
+    assert!(received[1].body.is_empty());
+}
+
+#[test]
+fn redirect_303_turns_delete_into_get() {
+    let (url, server) = serve(vec![
+        response("303 See Other", &[("Location", "/gone")], b""),
+        response("200 OK", &[], b""),
+    ]);
+    curlite::delete(&url).send().unwrap();
+    let received = server.join().unwrap();
+    assert_eq!(received[0].request_line, "DELETE / HTTP/1.1");
+    assert_eq!(received[1].request_line, "GET /gone HTTP/1.1");
+}
+
+#[test]
+fn redirect_307_resends_the_body_with_the_same_method() {
+    let (url, server) = serve(vec![
+        response("307 Temporary Redirect", &[("Location", "/v2")], b""),
+        response("201 Created", &[], b""),
+    ]);
+    let payload = vec![b'y'; 100_000];
+    curlite::put(&url)
+        .body(mime::APPLICATION_OCTET_STREAM, payload.clone())
+        .send()
+        .unwrap();
+    let received = server.join().unwrap();
+    assert_eq!(received[0].request_line, "PUT / HTTP/1.1");
+    assert_eq!(received[0].body, payload);
+    assert_eq!(received[1].request_line, "PUT /v2 HTTP/1.1");
+    assert_eq!(received[1].body, payload);
+    assert_eq!(
+        received[1].header("content-type"),
+        Some("application/octet-stream")
+    );
+}
+
+#[test]
+fn too_many_redirects() {
+    let (url, server) = serve(vec![
+        response("302 Found", &[("Location", "/1")], b""),
+        response("302 Found", &[("Location", "/2")], b""),
+    ]);
+    let err = curlite::get(&url).max_redirects(1).send().unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::TooManyRedirects(1)),
+        "{err:?}"
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+
+    let (url, server) = serve(vec![response("302 Found", &[("Location", "/1")], b"")]);
+    let err = curlite::get(&url).max_redirects(0).send().unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::TooManyRedirects(0)),
+        "{err:?}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn send_to_streams_the_final_body_only() {
+    let (url, server) = serve(vec![
+        response("302 Found", &[("Location", "/file")], b"not this"),
+        response("200 OK", &[], b"streamed"),
+    ]);
+    let mut out = Vec::new();
+    let resp = curlite::get(&url).send_to(&mut out).unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.body().is_empty());
+    assert_eq!(out, b"streamed");
+    server.join().unwrap();
+
+    // a redirect that is not followed is the final response
+    let (url, server) = serve(vec![response("302 Found", &[("Location", "/x")], b"here")]);
+    let mut out = Vec::new();
+    let resp = curlite::get(&url)
+        .follow_redirects(false)
+        .send_to(&mut out)
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert!(resp.body().is_empty());
+    assert_eq!(out, b"here");
+    server.join().unwrap();
+
+    // so is a 3xx without Location
+    let (url, server) = serve(vec![response("304 Not Modified", &[], b"")]);
+    let resp = curlite::get(&url).send_to(&mut out).unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    server.join().unwrap();
+}
+
+#[test]
+fn send_to_reports_writer_errors() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (url, server) = serve(vec![response("200 OK", &[], b"data")]);
+    let err = curlite::get(&url).send_to(&mut Broken).unwrap_err();
+    assert!(
+        matches!(&err, curlite::Error::Io(e) if e.to_string() == "disk full"),
+        "{err:?}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn body_reader_streams_with_content_length() {
+    let (url, server) = serve(vec![response("200 OK", &[], b"")]);
+    let payload = vec![b'r'; 200_000];
+    curlite::post(&url)
+        .body_reader(mime::TEXT_PLAIN, std::io::Cursor::new(payload.clone()))
+        .send()
+        .unwrap();
+    let received = server.join().unwrap().remove(0);
+    assert_eq!(received.header("content-length"), Some("200000"));
+    assert_eq!(received.header("content-type"), Some("text/plain"));
+    assert_eq!(received.body, payload);
+}
+
+#[test]
+fn default_user_agent_and_client_headers() {
+    let (url, server) = serve(vec![
+        response("200 OK", &[], b""),
+        response("200 OK", &[], b""),
+    ]);
+    curlite::get(&url).send().unwrap();
+    let client = curlite::Client::new().header(
+        curlite::header::USER_AGENT,
+        curlite::HeaderValue::from_static("mine/1"),
+    );
+    client.get(&url).send().unwrap();
+    let received = server.join().unwrap();
+    assert_eq!(
+        received[0].header("user-agent"),
+        Some(concat!("curlite/", env!("CARGO_PKG_VERSION")))
+    );
+    assert_eq!(received[1].header("user-agent"), Some("mine/1"));
+}
+
+#[test]
+fn nested_request_from_a_writer_does_not_panic() {
+    struct Nested(String, Vec<u8>);
+    impl Write for Nested {
+        fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+            let inner = curlite::get(&self.0)
+                .send()
+                .map_err(std::io::Error::other)?;
+            self.1.extend_from_slice(inner.body());
+            self.1.extend_from_slice(chunk);
+            Ok(chunk.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (outer_url, outer) = serve(vec![response("200 OK", &[], b"outer")]);
+    let (inner_url, inner) = serve(vec![response("200 OK", &[], b"inner")]);
+    let mut sink = Nested(inner_url, Vec::new());
+    curlite::get(&outer_url).send_to(&mut sink).unwrap();
+    assert_eq!(sink.1, b"innerouter");
+    outer.join().unwrap();
+    inner.join().unwrap();
+}

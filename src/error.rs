@@ -2,18 +2,14 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// libcurl failed to set an option or perform the transfer.
+    /// libcurl failed to set an option or perform the transfer. This includes
+    /// malformed URLs, which libcurl parses.
     #[error("curl error: {0}")]
     Curl(#[from] curl::Error),
-    /// libcurl rejected a multipart part.
-    #[error("curl form error: {0}")]
-    CurlForm(#[from] curl::FormError),
     #[error("invalid header name: {0}")]
     InvalidHeaderName(#[from] http::header::InvalidHeaderName),
     #[error("invalid header value: {0}")]
     InvalidHeaderValue(#[from] http::header::InvalidHeaderValue),
-    #[error("invalid URL: {0}")]
-    Url(#[from] url::ParseError),
     #[error("invalid status code: {0}")]
     InvalidStatusCode(#[from] http::status::InvalidStatusCode),
     /// A header value could not be represented as a string.
@@ -26,7 +22,17 @@ pub enum Error {
     Mime(#[from] mime::FromStrError),
     /// A multipart body could not be parsed.
     #[error("multipart parse error: {0}")]
-    Multipart(#[from] std::io::Error),
+    Multipart(String),
+    /// Reading a request body from a reader or writing a response body to a
+    /// writer failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// The server redirected more often than [`Request::max_redirects`]
+    /// allows.
+    ///
+    /// [`Request::max_redirects`]: crate::Request::max_redirects
+    #[error("too many redirects (more than {0})")]
+    TooManyRedirects(u32),
     #[error("body is not valid UTF-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 }

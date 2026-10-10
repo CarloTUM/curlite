@@ -1,0 +1,149 @@
+use http::Method;
+use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+use std::time::Duration;
+
+use crate::request::Request;
+
+/// Defaults shared by several requests: headers, timeouts and redirect
+/// handling. Requests built from a client start with these values and can
+/// override each of them.
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use curlite::{HeaderValue, header::AUTHORIZATION};
+///
+/// let api = curlite::Client::new()
+///     .header(AUTHORIZATION, HeaderValue::from_static("Bearer secret"))
+///     .timeout(Duration::from_secs(5));
+/// let me = api.get("https://example.com/me").send()?;
+/// let them = api.get("https://example.com/them").send()?;
+/// # Ok::<(), curlite::Error>(())
+/// ```
+///
+/// A client holds configuration only. The libcurl handle, and with it the
+/// connection cache, belongs to the thread; see [`Request::send`].
+#[derive(Debug, Clone)]
+pub struct Client {
+    headers: HeaderMap,
+    timeout: Duration,
+    connect_timeout: Option<Duration>,
+    follow_redirects: bool,
+    max_redirects: u32,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        let defaults = Request::new(Method::GET, "");
+        Client {
+            headers: HeaderMap::new(),
+            timeout: defaults.timeout,
+            connect_timeout: defaults.connect_timeout,
+            follow_redirects: defaults.follow_redirects,
+            max_redirects: defaults.max_redirects,
+        }
+    }
+}
+
+impl Client {
+    /// A client with the same defaults as the free functions.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A header sent with every request, unless the request sets the same
+    /// name itself. Takes parsed types so that building a client cannot
+    /// fail; [`Request::header`] accepts strings.
+    pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.headers.insert(name, value);
+        self
+    }
+
+    /// See [`Request::timeout`].
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// See [`Request::connect_timeout`].
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
+    /// See [`Request::follow_redirects`].
+    pub fn follow_redirects(mut self, follow: bool) -> Self {
+        self.follow_redirects = follow;
+        self
+    }
+
+    /// See [`Request::max_redirects`].
+    pub fn max_redirects(mut self, max: u32) -> Self {
+        self.max_redirects = max;
+        self
+    }
+
+    /// Starts a request with this client's defaults.
+    pub fn request(&self, method: Method, url: &str) -> Request {
+        let mut request = Request::new(method, url);
+        request.headers = self.headers.clone();
+        request.timeout = self.timeout;
+        request.connect_timeout = self.connect_timeout;
+        request.follow_redirects = self.follow_redirects;
+        request.max_redirects = self.max_redirects;
+        request
+    }
+
+    pub fn get(&self, url: &str) -> Request {
+        self.request(Method::GET, url)
+    }
+
+    pub fn post(&self, url: &str) -> Request {
+        self.request(Method::POST, url)
+    }
+
+    pub fn put(&self, url: &str) -> Request {
+        self.request(Method::PUT, url)
+    }
+
+    pub fn patch(&self, url: &str) -> Request {
+        self.request(Method::PATCH, url)
+    }
+
+    pub fn delete(&self, url: &str) -> Request {
+        self.request(Method::DELETE, url)
+    }
+
+    pub fn head(&self, url: &str) -> Request {
+        self.request(Method::HEAD, url)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::header::USER_AGENT;
+
+    #[test]
+    fn requests_inherit_and_override() {
+        let client = Client::new()
+            .header(USER_AGENT, HeaderValue::from_static("client"))
+            .header(
+                HeaderName::from_static("x-a"),
+                HeaderValue::from_static("1"),
+            )
+            .timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(1))
+            .follow_redirects(false)
+            .max_redirects(2);
+        let req = client.post("http://localhost").header("X-A", "2");
+        assert_eq!(req.method, Method::POST);
+        assert_eq!(req.headers[USER_AGENT], "client");
+        assert_eq!(req.headers["x-a"], "2");
+        assert_eq!(req.timeout, Duration::from_secs(3));
+        assert_eq!(req.connect_timeout, Some(Duration::from_secs(1)));
+        assert!(!req.follow_redirects);
+        assert_eq!(req.max_redirects, 2);
+    }
+}

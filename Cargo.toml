@@ -1,6 +1,6 @@
 [package]
 name = "curlite"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Small blocking HTTP client on top of libcurl: forms, multipart and raw bodies without an async runtime"
@@ -26,10 +26,8 @@ curl = "0.4"
 form_urlencoded = "1"
 http = "1"
 mime = "0.3"
-multipart = { package = "multipart_ng", version = "0.18", default-features = false, features = ["server"] }
 serde = { version = "1", features = ["derive"], optional = true }
 thiserror = "2"
-url = "2"
 
 [package.metadata.docs.rs]
 all-features = true

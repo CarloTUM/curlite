@@ -1,21 +1,22 @@
 use bytes::Bytes;
 use http::Method;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use mime::Mime;
-use url::Url;
 
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::Duration;
 
-use crate::body::{Body, Multipart, encode_form};
+use crate::body::{Body, Multipart, ReadSeek, Segments, boundary, encode_form};
 use crate::error::{Error, Result};
 use crate::response::Response;
-use crate::transport;
+use crate::transport::{self, Sink};
 
-/// A request under construction. Created with [`Request::new`] or one of the
-/// free functions ([`get`], [`post`], ...), and sent with [`Request::send`].
+/// A request under construction. Created with [`Request::new`], one of the
+/// free functions ([`get`], [`post`], ...) or a [`Client`], and sent with
+/// [`Request::send`] or [`Request::send_to`].
 ///
-/// Builder methods that can fail (`header`, `query`) record the error and
-/// return it from `send`, so that a request can be built in one expression.
+/// Builder methods that can fail (`header`) record the error and return it
+/// from `send`, so that a request can be built in one expression.
 ///
 /// ```no_run
 /// let response = curlite::post("https://example.com/api?debug=1")
@@ -28,33 +29,41 @@ use crate::transport;
 ///
 /// [`get`]: crate::get
 /// [`post`]: crate::post
+/// [`Client`]: crate::Client
 #[derive(Debug)]
 pub struct Request {
     pub(crate) method: Method,
-    pub(crate) url: Result<Url>,
+    pub(crate) url: String,
     pub(crate) headers: HeaderMap,
     pub(crate) body: Body,
     pub(crate) timeout: Duration,
+    pub(crate) connect_timeout: Option<Duration>,
     pub(crate) follow_redirects: bool,
     pub(crate) max_redirects: u32,
     /// First error from a builder method, returned by `send`.
     error: Option<Error>,
 }
 
+/// A request body ready for libcurl.
+pub(crate) struct Upload {
+    pub(crate) source: Box<dyn ReadSeek>,
+    pub(crate) len: u64,
+}
+
 impl Request {
-    /// Starts a request. `url` may contain a query string, which is kept.
+    /// Starts a request. `url` may contain a query string, which is kept; a
+    /// fragment is dropped. The URL is parsed by libcurl when the request is
+    /// sent.
     pub fn new(method: Method, url: &str) -> Self {
-        let url = Url::parse(url.trim()).map_err(Error::from).map(|mut url| {
-            // fragments are client side only and never sent
-            url.set_fragment(None);
-            url
-        });
+        let url = url.trim();
+        let url = url.split_once('#').map_or(url, |(before, _)| before);
         Request {
             method,
-            url,
+            url: url.to_owned(),
             headers: HeaderMap::new(),
             body: Body::Empty,
             timeout: Duration::from_secs(20),
+            connect_timeout: None,
             follow_redirects: true,
             max_redirects: 10,
             error: None,
@@ -91,14 +100,17 @@ impl Request {
     /// Appends a query parameter. Name and value are percent-encoded. A pair
     /// with an empty value is serialized as just its name.
     pub fn query(mut self, name: &str, value: &str) -> Self {
-        if let Ok(url) = &mut self.url {
-            let pair = encode_form([(name, value)]);
-            let query = match url.query() {
-                Some(existing) if !existing.is_empty() => format!("{existing}&{pair}"),
-                _ => pair,
-            };
-            url.set_query(Some(&query));
+        let pair = encode_form([(name, value)]);
+        match self.url.split_once('?') {
+            None => {
+                self.url.push('?');
+            }
+            Some((_, query)) if !query.is_empty() && !query.ends_with('&') => {
+                self.url.push('&');
+            }
+            Some(_) => {}
         }
+        self.url.push_str(&pair);
         self
     }
 
@@ -108,6 +120,22 @@ impl Request {
         self.body = Body::Raw {
             data: data.into(),
             content_type: Some(content_type),
+        };
+        self
+    }
+
+    /// Streams the body from `reader` with the given `Content-Type`, unless
+    /// a `Content-Type` header was set explicitly. Nothing is buffered beyond
+    /// libcurl's upload chunk.
+    ///
+    /// The reader has to seek: its length is taken from seeking to the end,
+    /// and it is rewound for `307`/`308` redirects and for retries on a
+    /// connection the server closed. For in-memory data use
+    /// [`Request::body`], which does not copy.
+    pub fn body_reader(mut self, content_type: Mime, reader: impl Read + Seek + 'static) -> Self {
+        self.body = Body::Reader {
+            reader: Box::new(reader),
+            content_type,
         };
         self
     }
@@ -131,14 +159,28 @@ impl Request {
         self
     }
 
+    /// Time limit for establishing the connection, including the TLS
+    /// handshake. Defaults to libcurl's 300 seconds, bounded by
+    /// [`Request::timeout`].
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
     /// Whether to follow 3xx redirects, default `true`. When disabled, the
     /// redirect response itself is returned.
+    ///
+    /// Redirects are followed by this crate, not by libcurl: `303` turns any
+    /// method into `GET`, `301` and `302` turn `POST` into `GET`, `307` and
+    /// `308` resend the body with the same method. `Authorization` is
+    /// dropped when the redirect leaves the origin (scheme, host and port).
     pub fn follow_redirects(mut self, follow: bool) -> Self {
         self.follow_redirects = follow;
         self
     }
 
-    /// Maximum number of redirects to follow before failing, default 10.
+    /// Maximum number of redirects to follow before failing with
+    /// [`Error::TooManyRedirects`], default 10.
     pub fn max_redirects(mut self, max: u32) -> Self {
         self.max_redirects = max;
         self
@@ -147,21 +189,31 @@ impl Request {
     /// Performs the request and reads the whole response into memory.
     ///
     /// Requests on the same thread share one libcurl handle, so connections
-    /// to the same host are reused across calls.
+    /// to the same host are reused across calls. A request sent while that
+    /// handle is busy, from inside a [`Request::send_to`] writer or a
+    /// [`Request::body_reader`] reader, uses a handle of its own.
     pub fn send(self) -> Result<Response> {
-        if let Some(error) = self.error {
+        self.send_with(Sink::Memory)
+    }
+
+    /// Performs the request and writes the response body to `writer` as it
+    /// arrives, instead of holding it in memory. The returned response has
+    /// an empty body. Bodies of redirects that are followed are discarded.
+    pub fn send_to(self, writer: &mut dyn Write) -> Result<Response> {
+        self.send_with(Sink::Writer(writer))
+    }
+
+    fn send_with(mut self, sink: Sink<'_>) -> Result<Response> {
+        if let Some(error) = self.error.take() {
             return Err(error);
         }
-        transport::perform(self)
+        let upload = self.prepare_body()?;
+        transport::perform(self, upload, sink)
     }
 
     /// The URL the request will be sent to, including query parameters.
-    pub fn url(&self) -> Result<&Url> {
-        self.url.as_ref().map_err(|e| match e {
-            Error::Url(e) => Error::Url(*e),
-            // `url` only ever holds a parse error
-            _ => unreachable!(),
-        })
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     pub(crate) fn record(&mut self, error: Error) {
@@ -170,30 +222,67 @@ impl Request {
         }
     }
 
-    /// Sets the `Content-Type` header that the body implies.
-    pub(crate) fn finalize_headers(&mut self) -> Result<()> {
-        match &mut self.body {
-            Body::Raw { content_type, .. } => {
-                if let Some(ct) = content_type.take()
+    /// Takes the body out of the request, sets the headers it implies
+    /// (`Content-Type`, a default `User-Agent`) and returns what to upload.
+    pub(crate) fn prepare_body(&mut self) -> Result<Option<Upload>> {
+        let set_content_type = |headers: &mut HeaderMap, mime: &Mime| -> Result<()> {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_str(mime.as_ref())?);
+            Ok(())
+        };
+        if !self.headers.contains_key(USER_AGENT) {
+            self.headers.insert(
+                USER_AGENT,
+                HeaderValue::from_static(concat!("curlite/", env!("CARGO_PKG_VERSION"))),
+            );
+        }
+        let upload = match std::mem::take(&mut self.body) {
+            Body::Empty => None,
+            Body::Raw { data, content_type } => {
+                if let Some(ct) = content_type
                     && !self.headers.contains_key(CONTENT_TYPE)
                 {
-                    self.headers
-                        .insert(CONTENT_TYPE, HeaderValue::from_str(ct.as_ref())?);
+                    set_content_type(&mut self.headers, &ct)?;
                 }
+                Some(Upload::segments(vec![data]))
             }
-            Body::Form(_) => {
-                self.headers.insert(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("application/x-www-form-urlencoded"),
-                );
+            Body::Form(encoded) => {
+                set_content_type(&mut self.headers, &mime::APPLICATION_WWW_FORM_URLENCODED)?;
+                Some(Upload::segments(vec![Bytes::from(encoded)]))
             }
-            // libcurl sets the multipart content type with its boundary
-            Body::Multipart(_) => {
-                self.headers.remove(CONTENT_TYPE);
+            Body::Multipart(multipart) => {
+                let boundary = boundary();
+                let mime: Mime = format!("multipart/form-data; boundary={boundary}")
+                    .parse()
+                    .expect("valid boundary");
+                set_content_type(&mut self.headers, &mime)?;
+                Some(Upload::segments(multipart.into_segments(&boundary)))
             }
-            Body::Empty => {}
+            Body::Reader {
+                mut reader,
+                content_type,
+            } => {
+                if !self.headers.contains_key(CONTENT_TYPE) {
+                    set_content_type(&mut self.headers, &content_type)?;
+                }
+                let len = reader.seek(SeekFrom::End(0))?;
+                reader.seek(SeekFrom::Start(0))?;
+                Some(Upload {
+                    source: reader,
+                    len,
+                })
+            }
+        };
+        Ok(upload)
+    }
+}
+
+impl Upload {
+    fn segments(parts: Vec<Bytes>) -> Self {
+        let segments = Segments::new(parts);
+        Upload {
+            len: segments.len(),
+            source: Box::new(segments),
         }
-        Ok(())
     }
 }
 
@@ -226,14 +315,12 @@ shorthand! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn url_keeps_query_and_drops_fragment() {
-        let req = get("https://example.com/path?test=value&onlyname#frag");
-        assert_eq!(
-            req.url().unwrap().as_str(),
-            "https://example.com/path?test=value&onlyname"
-        );
+        let req = get(" https://example.com/path?test=value&onlyname#frag ");
+        assert_eq!(req.url(), "https://example.com/path?test=value&onlyname");
     }
 
     #[test]
@@ -242,17 +329,24 @@ mod tests {
             .query("b", "b 1")
             .query("c", "");
         assert_eq!(
-            req.url().unwrap().as_str(),
+            req.url(),
             "https://example.com/?test=value&onlyname&b=b+1&c"
         );
         let req = get("https://example.com").query("a", "=");
-        assert_eq!(req.url().unwrap().as_str(), "https://example.com/?a=%3D");
+        assert_eq!(req.url(), "https://example.com?a=%3D");
+        let req = get("https://example.com/?").query("a", "1");
+        assert_eq!(req.url(), "https://example.com/?a=1");
+        let req = get("https://example.com/?x=1&").query("a", "1");
+        assert_eq!(req.url(), "https://example.com/?x=1&a=1");
     }
 
     #[test]
     fn invalid_url_surfaces_at_send() {
         let err = get("not a url").send().unwrap_err();
-        assert!(matches!(err, Error::Url(_)));
+        assert!(
+            matches!(err, Error::Curl(ref e) if e.is_url_malformed()),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -269,24 +363,31 @@ mod tests {
         assert!(matches!(err, Error::InvalidHeaderValue(_)));
     }
 
+    fn read_all(upload: Option<Upload>) -> (u64, Vec<u8>) {
+        let mut upload = upload.expect("a body");
+        let mut out = Vec::new();
+        upload.source.read_to_end(&mut out).unwrap();
+        (upload.len, out)
+    }
+
     #[test]
     fn body_sets_content_type_unless_present() {
         let mut req = post("http://localhost").body(mime::TEXT_XML, "<a/>");
-        req.finalize_headers().unwrap();
+        let upload = req.prepare_body().unwrap();
         assert_eq!(req.headers[CONTENT_TYPE], "text/xml");
-        assert!(matches!(
-            req.body,
-            Body::Raw {
-                content_type: None,
-                ..
-            }
-        ));
+        assert_eq!(read_all(upload), (4, b"<a/>".to_vec()));
 
         let mut req = post("http://localhost")
             .header(CONTENT_TYPE, "application/custom")
             .body(mime::TEXT_XML, "<a/>");
-        req.finalize_headers().unwrap();
+        req.prepare_body().unwrap();
         assert_eq!(req.headers[CONTENT_TYPE], "application/custom");
+
+        let mut req =
+            post("http://localhost").body_reader(mime::TEXT_PLAIN, Cursor::new(b"hello".to_vec()));
+        let upload = req.prepare_body().unwrap();
+        assert_eq!(req.headers[CONTENT_TYPE], "text/plain");
+        assert_eq!(read_all(upload), (5, b"hello".to_vec()));
     }
 
     #[test]
@@ -294,17 +395,36 @@ mod tests {
         let mut req = post("http://localhost")
             .header(CONTENT_TYPE, "text/plain")
             .form([("a", "b"), ("c", "d")]);
-        req.finalize_headers().unwrap();
+        let upload = req.prepare_body().unwrap();
         assert_eq!(
             req.headers[CONTENT_TYPE],
             "application/x-www-form-urlencoded"
         );
-        assert!(matches!(req.body, Body::Form(ref s) if s == "a=b&c=d"));
+        assert_eq!(read_all(upload).1, b"a=b&c=d");
 
         let mut req = post("http://localhost")
             .header(CONTENT_TYPE, "text/plain")
             .multipart(Multipart::new().text("a", "b"));
-        req.finalize_headers().unwrap();
-        assert!(!req.headers.contains_key(CONTENT_TYPE));
+        let upload = req.prepare_body().unwrap();
+        let content_type = req.headers[CONTENT_TYPE].to_str().unwrap().to_owned();
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+        let (len, encoded) = read_all(upload);
+        assert_eq!(len as usize, encoded.len());
+        assert!(encoded.starts_with(format!("--{boundary}\r\n").as_bytes()));
+    }
+
+    #[test]
+    fn default_user_agent() {
+        let mut req = get("http://localhost");
+        req.prepare_body().unwrap();
+        assert_eq!(
+            req.headers[USER_AGENT],
+            concat!("curlite/", env!("CARGO_PKG_VERSION"))
+        );
+        let mut req = get("http://localhost").header(USER_AGENT, "mine");
+        req.prepare_body().unwrap();
+        assert_eq!(req.headers[USER_AGENT], "mine");
     }
 }
