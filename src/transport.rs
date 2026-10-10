@@ -418,10 +418,19 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     if let Some(path) = &request.unix_socket {
         easy.unix_socket_path(Some(path))?;
     }
-    if let Some(path) = &request.ca_bundle {
+    // TLS options only for TLS: a libcurl built without it rejects them
+    let https = request
+        .url
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    if let Some(path) = &request.ca_bundle
+        && https
+    {
         easy.cainfo(path)?;
     }
-    if let Some((cert, key)) = &request.client_cert {
+    if let Some((cert, key)) = &request.client_cert
+        && https
+    {
         easy.ssl_cert(cert)?;
         easy.ssl_key(key)?;
     }
@@ -429,10 +438,7 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
         easy.ssl_verify_peer(false)?;
         easy.ssl_verify_host(false)?;
     } else if request.ca_bundle.is_none()
-        && request
-            .url
-            .get(..8)
-            .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+        && https
         && let Some((one_cert, dir)) = lazy_ca_store()
     {
         // OpenSSL looks certificates up by hash in `CApath` on demand,
@@ -447,13 +453,14 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
         easy.accept_encoding("")?;
     }
     if let Some(auth) = &request.auth {
+        static EMPTY: String = String::new();
         let mut methods = curl::easy::Auth::new();
         let credentials = match auth {
             Auth::Basic { user, password } => Some((user, password, methods.basic(true))),
             Auth::Digest { user, password } => Some((user, password, methods.digest(true))),
             Auth::Ntlm { user, password } => Some((user, password, methods.ntlm(true))),
             // libcurl only negotiates once a user is set, `-u :` in curl
-            Auth::Negotiate => Some((&String::new(), &String::new(), methods.gssnegotiate(true))),
+            Auth::Negotiate => Some((&EMPTY, &EMPTY, methods.gssnegotiate(true))),
             // the header is added below
             Auth::Bearer(_) => None,
         };
