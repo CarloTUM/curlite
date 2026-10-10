@@ -51,7 +51,7 @@ Compared with the other blocking clients, from their sources
 | | curlite | ureq | reqwest |
 |---|---|---|---|
 | HTTP/2 | yes | no | yes |
-| HTTP/3 | with a libcurl that has it | no | unstable feature |
+| HTTP/3 | with a libcurl that has it; static build in [curl-rust#688](https://github.com/sagebind/curl-rust/pull/688) | no | unstable feature |
 | Proxy from the environment, SOCKS | yes | yes, feature | yes, feature |
 | Basic, Bearer | yes | by header | yes |
 | Digest | yes | no | no |
@@ -178,11 +178,16 @@ With `rustls` instead of `rustls-ring` (and `AWS_LC_SYS_NO_JITTER_ENTROPY=1`
 in the build environment) the same recipe gives the fastest HTTPS on the
 board, at the price of cmake at build time and 1.3 MiB more binary.
 
-The `rustls-ring` feature of the `curl` crate is not upstream yet; the
-[benchmark repository](https://github.com/CarloTUM/curlite-bench) carries
-the patch, the build recipe and the measurement scripts. Until it lands,
-`rustls` with `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the environment of the
-build gets the same cold start and a slightly faster handshake on ARM.
+The `rustls-ring` feature of the `curl` crate is proposed in
+[sagebind/curl-rust#687](https://github.com/sagebind/curl-rust/pull/687);
+the [benchmark repository](https://github.com/CarloTUM/curlite-bench)
+carries the patch, the build recipe and the measurement scripts. Until it
+lands, `rustls` with `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the environment of
+the build gets the same cold start and a slightly faster handshake on ARM.
+HTTP/3 in a static build is
+[sagebind/curl-rust#688](https://github.com/sagebind/curl-rust/pull/688):
+an `http3` feature that builds libcurl on ngtcp2 and nghttp3 with OpenSSL's
+QUIC API, passed through here once released.
 
 ## How it runs
 
