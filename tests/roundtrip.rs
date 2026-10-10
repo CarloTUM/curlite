@@ -1,6 +1,5 @@
 //! End-to-end tests against a minimal HTTP/1.1 server on a loopback port.
 
-use curlite::params::Parameter;
 use curlite::{Multipart, StatusCode};
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -255,40 +254,6 @@ fn connection_is_reused_on_the_same_thread() {
     assert_eq!(curlite::get(&url).send().unwrap().text().unwrap(), "2");
     // the server only accepts a second connection if the first one was closed
     server.join().unwrap();
-}
-
-#[test]
-fn parameters_end_to_end() {
-    let (url, server) = serve(vec![response(
-        "200 OK",
-        &[("Content-Type", "application/x-www-form-urlencoded")],
-        b"answer=42&more=a+b",
-    )]);
-    let resp = curlite::put(&format!("{url}/svc"))
-        .parameters([
-            Parameter::query("debug", "1"),
-            Parameter::body("x", "1"),
-            Parameter::complex("doc", mime::APPLICATION_JSON, &b"{}"[..]),
-        ])
-        .send()
-        .unwrap();
-    let params = resp.parameters().unwrap();
-    assert_eq!(
-        params,
-        vec![
-            Parameter::body("answer", "42"),
-            Parameter::body("more", "a b")
-        ]
-    );
-
-    let received = server.join().unwrap().remove(0);
-    assert_eq!(received.request_line, "PUT /svc?debug=1 HTTP/1.1");
-    assert!(
-        received
-            .header("content-type")
-            .unwrap()
-            .starts_with("multipart/form-data")
-    );
 }
 
 #[test]
@@ -846,3 +811,4 @@ fn streamed_chunks_arrive_without_delay() {
     assert_eq!(rest, b"chunk1chunk2");
     server.join().unwrap();
 }
+

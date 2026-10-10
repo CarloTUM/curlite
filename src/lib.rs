@@ -30,18 +30,15 @@
 //! [`Request::send`], streamed to a writer by [`Request::send_to`] or read
 //! on demand through [`Request::send_reader`]. Multipart responses are
 //! split with [`Response::parts`]. A [`Client`] holds headers, timeouts,
-//! proxy and TLS settings shared by several requests, and the [`params`]
-//! module adds a parameter model in which the body format follows from the
-//! parameters.
+//! proxy and TLS settings shared by several requests.
 //!
 //! # Features
 //!
 //! * `json`: [`Request::json`] and [`Response::json`] via `serde_json`.
-//! * `serde`: the [`params`] types implement `serde::Serialize`.
 //! * `log`: libcurl's verbose output as `log::trace!` records with target
 //!   `curlite`, when that level is enabled.
-//! * `static-curl`, `static-ssl`, `rustls`: passed through to the [`curl`]
-//!   crate, see below.
+//! * `http2`, `static-curl`, `static-ssl`, `rustls`: passed through to the
+//!   [`curl`] crate, see below.
 //!
 //! # TLS
 //!
@@ -56,7 +53,6 @@
 mod body;
 mod client;
 mod error;
-pub mod params;
 mod request;
 mod response;
 mod transport;

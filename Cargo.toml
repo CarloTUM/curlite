@@ -17,8 +17,6 @@ exclude = ["/.github"]
 # dependency, which a static musl build needs.
 default = ["ssl"]
 ssl = ["curl/ssl"]
-# `Parameter` and friends implement `serde::Serialize`
-serde = ["dep:serde"]
 # `Request::json` and `Response::json`
 json = ["dep:serde", "dep:serde_json"]
 # libcurl's verbose output as `log::trace!` records with target "curlite"

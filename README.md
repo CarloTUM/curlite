@@ -56,12 +56,6 @@ Redirects are followed by `curlite` itself, with the verb handling of RFC
 the origin. libcurl's own following is not used because it keeps a custom verb
 such as `DELETE` across every redirect.
 
-The `params` module adds a parameter model for services that exchange named
-values and files, where the body format follows from the parameters: one body
-parameter is sent raw, several text parameters as a form, anything with a file
-as multipart. Responses parse back into the same model. This is the interface
-of the [CPEE](https://cpee.org) process engine.
-
 ## TLS and linking
 
 TLS comes from libcurl. By default the system libcurl is linked dynamically,

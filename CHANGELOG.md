@@ -14,6 +14,10 @@ Breaking:
   `307`/`308` resend the body). `Authorization` is dropped on redirects that
   leave the origin. Exceeding `max_redirects` is `Error::TooManyRedirects`.
 - Every request sends `User-Agent: curlite/<version>` unless one is set.
+- The `params` module and the `serde` feature are gone. The CPEE parameter
+  model was specific to one service and is not part of a general HTTP
+  client; `Response::parts` and `ResponsePart::parts` give its building
+  blocks.
 
 Added:
 
@@ -25,6 +29,7 @@ Added:
   `ca_bundle`, `danger_accept_invalid_certs`, `compression` (on by default:
   libcurl asks for and decodes compressed responses).
 - `Response::error_for_status` and `Error::Status`.
+- `ResponsePart::parts` splits a nested multipart part.
 - `Client`: headers, timeouts, redirect and connection settings shared by
   requests.
 - Features `json` (`Request::json`, `Response::json`), `log` (libcurl's

@@ -64,18 +64,7 @@ impl Response {
     /// Part bodies are slices of [`Response::body`]; nothing is copied.
     /// Nested multipart parts are not expanded.
     pub fn parts(&self) -> Result<Vec<ResponsePart>> {
-        let content_type = self.content_type()?.ok_or_else(|| {
-            Error::HeaderParse("multipart response without Content-Type".to_owned())
-        })?;
-        if content_type.type_() != mime::MULTIPART {
-            return Err(Error::HeaderParse(format!(
-                "expected a multipart Content-Type, got {content_type}"
-            )));
-        }
-        let boundary = content_type.get_param(BOUNDARY).ok_or_else(|| {
-            Error::HeaderParse("multipart Content-Type without boundary".to_owned())
-        })?;
-        parse_multipart(&self.body, boundary.as_str())
+        split_parts(self.content_type()?.as_ref(), &self.body)
     }
 
     /// Turns a 4xx or 5xx status into [`Error::Status`], which keeps the
@@ -100,6 +89,28 @@ impl Response {
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect()
     }
+}
+
+impl ResponsePart {
+    /// Splits a part that is itself `multipart/*` into its parts, which share
+    /// the same buffer. Fails if the part has no multipart `Content-Type`.
+    pub fn parts(&self) -> Result<Vec<ResponsePart>> {
+        split_parts(self.content_type.as_ref(), &self.body)
+    }
+}
+
+fn split_parts(content_type: Option<&Mime>, body: &Bytes) -> Result<Vec<ResponsePart>> {
+    let content_type = content_type
+        .ok_or_else(|| Error::HeaderParse("multipart body without Content-Type".to_owned()))?;
+    if content_type.type_() != mime::MULTIPART {
+        return Err(Error::HeaderParse(format!(
+            "expected a multipart Content-Type, got {content_type}"
+        )));
+    }
+    let boundary = content_type
+        .get_param(BOUNDARY)
+        .ok_or_else(|| Error::HeaderParse("multipart Content-Type without boundary".to_owned()))?;
+    parse_multipart(body, boundary.as_str())
 }
 
 pub(crate) fn parse_content_type(headers: &HeaderMap) -> Result<Option<Mime>> {
@@ -342,6 +353,29 @@ mod tests {
                 .as_ptr()
                 .wrapping_add(find(&body, 0, b"1\r\n").unwrap())
         );
+    }
+
+    #[test]
+    fn nested_parts() {
+        let body = Bytes::from_static(
+            b"--outer\r\nContent-Type: multipart/mixed; boundary=inner\r\n\r\n\
+              --inner\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n\
+              --inner--\r\n\r\n\
+              --outer\r\nContent-Type: text/plain\r\n\r\nflat\r\n\
+              --outer--\r\n",
+        );
+        let parts = parse_multipart(&body, "outer").unwrap();
+        assert_eq!(parts.len(), 2);
+        let inner = parts[0].parts().unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0].name, "a");
+        assert_eq!(inner[0].body, "1");
+        // a slice of the outer buffer, not a copy
+        assert!(body.as_ptr_range().contains(&inner[0].body.as_ptr()));
+        assert!(matches!(
+            parts[1].parts().unwrap_err(),
+            Error::HeaderParse(_)
+        ));
     }
 
     #[test]
