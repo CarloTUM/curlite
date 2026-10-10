@@ -69,4 +69,6 @@ pub use transport::ResponseReader;
 
 pub use bytes::Bytes;
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+/// The `mime` crate, for `mime::APPLICATION_JSON` and friends.
+pub use mime;
 pub use mime::Mime;

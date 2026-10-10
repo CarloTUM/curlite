@@ -4,88 +4,105 @@
 [![crates.io](https://img.shields.io/crates/v/curlite.svg)](https://crates.io/crates/curlite)
 [![docs.rs](https://docs.rs/curlite/badge.svg)](https://docs.rs/curlite)
 
-curl's HTTP stack as a Rust library. A small blocking client on libcurl for
-programs that have to work where they are deployed: CLI tools, agents, hooks,
-cron jobs, plugins, distro packages and small devices, behind whatever proxy,
-certificate store and single sign-on the machine has. No async runtime, 20
-crates, and everything libcurl already does.
+A small blocking HTTP client on libcurl. It uses the machine's proxies,
+certificate store and credentials, so a program on curlite behaves like
+`curl` does on that host. For CLI tools, cron jobs, plugins, distro packages
+and small devices: no async runtime, 20 crates, and the HTTP features of
+whatever libcurl is linked.
 
 ```rust
-use curlite::Multipart;
+use curlite::{Multipart, mime};
 
-let response = curlite::post("https://example.com/upload?debug=1")
-    .bearer_auth("secret")
-    .multipart(
-        Multipart::new()
-            .text("description", "quarterly report")
-            .file("file", "q3.pdf", mime::APPLICATION_PDF, std::fs::read("q3.pdf")?),
-    )
-    .send()?;
+fn main() -> curlite::Result<()> {
+    let response = curlite::post("https://example.com/upload?debug=1")
+        .bearer_auth("secret")
+        .multipart(
+            Multipart::new()
+                .text("description", "quarterly report")
+                .file("file", "q3.pdf", mime::APPLICATION_PDF, std::fs::read("q3.pdf")?),
+        )
+        .send()?;
 
-println!("{}", response.status());
-for part in response.parts()? {
-    println!("{}: {} bytes", part.name, part.body.len());
+    println!("{}", response.status());
+    // a multipart response, split into parts that borrow the response buffer
+    for part in response.parts()? {
+        println!("{}: {} bytes", part.name, part.body.len());
+    }
+    Ok(())
 }
 ```
 
 ## What you get
 
 - **The environment, honoured.** `http_proxy`, `no_proxy` and friends, SOCKS,
-  the system certificate store, `~/.netrc`, Kerberos tickets and NTLM: a
-  program on curlite behaves like `curl` does on that machine.
-- **HTTP/2 and HTTP/3**, whatever the libcurl on the machine negotiates.
-- **Bodies both ways without copies.** Raw bytes, forms, JSON, streamed from a
-  file, `multipart/form-data` encoded part by part; multipart responses split
-  into slices of the response buffer.
+  the system certificate store, `~/.netrc`, and Kerberos tickets or NTLM where
+  the linked libcurl supports them (the distro one does, a `static-curl`
+  build only with the `curl` crate's `spnego` and `ntlm` features).
+- **HTTP/2, and HTTP/3** where libcurl has it.
+- **Bodies both ways, held once.** Raw bytes, forms, JSON, a file streamed
+  from disk, `multipart/form-data` sent part by part; multipart responses
+  split into slices of the response buffer, nested ones too.
 - **Streaming with backpressure.** `send_to(&mut writer)`, or `send_reader()`
-  for an `impl Read` that pulls from the socket on demand. A progress callback
-  for both directions.
+  for an `impl Read` that pulls from the socket on demand, and a progress
+  callback for both directions.
 - **Timeouts that fit downloads.** No total limit by default; a transfer fails
   when nothing moves for 30 seconds.
-- **`to_curl()`** prints any request as a `curl` command line, secrets as
+- **`to_curl()`** prints any request as a `curl` command line, credentials as
   shell variables, for logs and bug reports.
 
-Compared with the other blocking clients, from their sources
-(ureq 3.4, reqwest 0.12 `blocking`):
+Against the other blocking clients, from their sources on 2026-10-11
+(ureq 3.4.2, reqwest 0.12.28 `blocking`):
 
 | | curlite | ureq | reqwest |
 |---|---|---|---|
+| Pure Rust, no C toolchain | no | yes | yes |
+| Async API | no | no | yes, blocking is a wrapper |
 | HTTP/2 | yes | no | yes |
-| HTTP/3 | with a libcurl that has it; static build in [curl-rust#688](https://github.com/sagebind/curl-rust/pull/688) | no | unstable feature |
+| HTTP/3 | with a libcurl built with it (static build: [curl-rust#688](https://github.com/sagebind/curl-rust/pull/688), unreleased) | no | unstable feature |
 | Proxy from the environment, SOCKS | yes | yes, feature | yes, feature |
-| Basic, Bearer | yes | by header | yes |
+| Basic, Bearer | yes | set the header yourself | yes |
 | Digest | yes | no | no |
-| Kerberos (Negotiate), NTLM | yes | no | no |
+| Kerberos (Negotiate), NTLM | with the system libcurl | no | no |
 | `~/.netrc` | yes | no | no |
 | Unix domain socket | yes | custom transport | yes |
 | Client certificate | yes | yes | yes |
 | Multipart responses | yes | no | no |
 | Progress callback | yes | no | no |
-| Default timeout | stall, 30 s | none | 30 s total |
+| Default timeout | 30 s without data | none | 30 s per request |
 | Request as a `curl` command | yes | no | no |
-| Runtime thread | no | no | tokio |
-| Crates in a plain build | 20 | 22 | 85 |
+| Background runtime thread | no | no | tokio |
+| Crates, default features | 20 | 22 | 85 |
 | TLS | libcurl's: OpenSSL, GnuTLS, Schannel, Secure Transport, or static rustls | rustls, native-tls | rustls, native-tls |
 
+Crates are `cargo tree -e normal`, unique names, the crate itself included.
 ureq is the better choice when the program must be pure Rust, reqwest when it
 is async anyway. curlite is for the rest: the program that must work in a
 corporate network on Monday, on a Debian box with the distro libcurl, and on a
 router with 64 MiB of RAM, with one binary each.
 
-## Requests
+## Requests and responses
 
-Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
-`multipart(..)` or, with the `json` feature, `json(&value)`; everything else
-(`query`, `header`, `basic_auth`, `bearer_auth`, `auth`, `netrc`,
-`stall_timeout`, `timeout`, `connect_timeout`, `follow_redirects`,
-`http_version`, `proxy`, `unix_socket`, `ca_bundle`, `client_cert`,
-`compression`, `max_body_size`, `on_progress`) is on the builder. `send()` reads the response
-into memory, `send_to(&mut writer)` streams it, `send_reader()` returns an
-`impl Read` that pulls from the connection with backpressure. Responses
-expose `url()`, `status()`, `headers()`, `body()`, `text()`, `json()`,
-`form()`, `parts()` (multipart parts as slices of the response buffer) and
-`error_for_status()`. A `Client` holds headers, timeouts and connection
-settings shared by several requests.
+`curlite::get(url)` (and `post`, `put`, `patch`, `delete`, `head`) starts a
+request with the defaults; a `Client` holds headers, credentials, timeouts and
+connection settings that several requests share, and starts requests the same
+way. On the request:
+
+| | |
+|---|---|
+| `query`, `header` | URL parameter, header; `headers` replaces them all |
+| `body(mime, bytes)`, `form(pairs)`, `json(&value)`, `multipart(form)`, `body_reader(mime, reader)` | the body: raw, urlencoded, JSON (`json` feature), `multipart/form-data`, streamed from a `Read + Seek` |
+| `basic_auth`, `bearer_auth`, `auth(Auth)`, `netrc` | credentials; `Auth` also has `Digest`, `Negotiate` and `Ntlm` |
+| `stall_timeout`, `connect_timeout`, `timeout` | 30 s without data, 30 s to connect, no total limit |
+| `follow_redirects`, `max_redirects` | on, 10 |
+| `http_version`, `proxy`, `unix_socket` | force a version, a proxy instead of the environment's, a socket instead of the host |
+| `ca_bundle`, `client_cert`, `danger_accept_invalid_certs` | TLS trust and client authentication |
+| `compression`, `max_body_size`, `on_progress` | ask for compressed responses (on), bound `send` (64 MiB), byte counts |
+| `send`, `send_to(&mut writer)`, `send_reader` | body into memory, into a writer, or as an `impl Read` with backpressure |
+| `to_curl` | the request as a `curl` command line |
+
+On the response: `url` (after redirects), `status`, `headers`, `body` (a
+`Bytes`), `text`, `json`, `form`, `parts` (multipart, borrowing the buffer),
+`error_for_status`.
 
 ```rust
 let api = curlite::Client::new()
@@ -97,65 +114,46 @@ api.get("https://example.com/big.iso")
     .send_to(&mut file)?;
 ```
 
-Authentication is libcurl's: `Auth::Basic`, `Bearer`, `Digest`, `Negotiate`
-(Kerberos, with the ticket of the process) and `Ntlm`, and `netrc()` takes
-the credentials for a host from `~/.netrc`. Credentials, like an
-`Authorization` header, are dropped when a redirect leaves the origin.
-
-There is no total time limit by default. A transfer fails when nothing has
-moved for 30 seconds (`stall_timeout`) or the connection takes longer than 30
-seconds to establish (`connect_timeout`); a large download that keeps
-flowing is never cut off. `timeout` adds a hard limit per transfer.
-
-Redirects are followed by `curlite` itself, with the verb handling of RFC
-9110: `303` turns any method into `GET`, `301`/`302` do so for `POST`,
-`307`/`308` resend the body. libcurl's own following is not used because it
-keeps a custom verb such as `DELETE` across every redirect.
+curlite follows redirects itself, up to `max_redirects`, so that it can do
+what RFC 9110 says: `303` becomes `GET`, `301` and `302` turn a `POST` into
+`GET`, `307` and `308` resend the body. libcurl would repeat a `DELETE` on
+every hop. Only `http` and `https` targets are followed, and `Authorization`,
+`Cookie` and the request's credentials are dropped when a redirect leaves the
+origin; other headers travel.
 
 ## TLS and linking
 
 TLS comes from libcurl. By default the system libcurl is linked dynamically,
 with whatever TLS library it was built against. That needs the development
 package (`libcurl4-openssl-dev` on Debian and Ubuntu, `libcurl-devel` on
-Fedora, `curl-dev` on Alpine, `curl` from Homebrew); without it, the
-[`curl`](https://crates.io/crates/curl) crate silently builds libcurl from
-source and links it statically against the system OpenSSL. The `static-curl`,
-`static-ssl` and `rustls` features are passed through to the `curl` crate to
-ask for a static build explicitly.
+Fedora, `curl-dev` on Alpine, `curl` from Homebrew). When `pkg-config` finds
+no libcurl, the [`curl`](https://crates.io/crates/curl) crate builds one from
+source and links it statically against the system OpenSSL, without saying so.
+The `static-curl`, `static-ssl`, `rustls` and `http2` features are passed
+through to the `curl` crate to ask for a static build explicitly.
 
 ## Building for small processes
 
 What a short-lived process pays before its first byte is decided by the
-build, not by this crate. Measured on an Orange Pi Zero 2W (Cortex-A53,
-Debian 13) for one `GET` per process, CPU time and peak RSS:
+build, not by this crate. One `GET` per process on an Orange Pi Zero 2W
+(Cortex-A53), CPU time and peak RSS, 20 runs each; the full table, the method
+and the x86 numbers are in [curlite-bench](https://github.com/CarloTUM/curlite-bench):
 
-| libcurl | TLS | plain HTTP | HTTPS | binary |
-|---|---|---|---|---|
-| system (`libcurl4`, 34 shared libraries) | OpenSSL 3, dynamic | 36.7 ms, 12.0 MiB | 75 ms | 0.5 MiB |
-| `static-curl` | OpenSSL 3, dynamic | 17.0 ms, 6.9 MiB | 55 ms | 1.1 MiB |
-| `static-curl` + `static-ssl` | OpenSSL 3, static | 10.4 ms, 5.5 MiB | 48 ms | 6.2 MiB |
-| `static-curl` + `rustls` | aws-lc, jitter entropy on | 5.9 ms, 3.0 MiB | **433 ms** | 3.4 MiB |
-| `static-curl` + `rustls`, `AWS_LC_SYS_NO_JITTER_ENTROPY=1` | aws-lc | 5.5 ms, 3.0 MiB | 21 ms | 3.4 MiB |
-| `static-curl` + rustls on ring, non-PIE | ring | 4.7 ms, 2.6 MiB | 28 ms | 1.9 MiB |
-| same, static musl binary | ring | **3.0 ms, 1.1 MiB** | 26 ms | 2.0 MiB |
-| static musl, `rustls`, no jitter entropy | aws-lc | 3.3 ms, 1.4 MiB | **19 ms** | 3.3 MiB |
-| ureq 3 (rustls), for comparison | rustls | 4.3 ms, 2.4 MiB | 21 ms | 1.6 MiB |
-| minreq, for comparison | rustls | 3.5 ms, 2.1 MiB | 20 ms | 1.2 MiB |
+| build | plain HTTP | HTTPS | binary |
+|---|---|---|---|
+| system `libcurl4` (34 shared libraries) | 36.7 ms, 12.0 MiB | 75 ms | 0.5 MiB |
+| `static-curl` + `static-ssl` (OpenSSL 3) | 10.4 ms, 5.5 MiB | 48 ms | 6.2 MiB |
+| `static-curl` + `rustls` (aws-lc), `AWS_LC_SYS_NO_JITTER_ENTROPY=1` | 5.5 ms, 3.0 MiB | 21 ms | 3.4 MiB |
+| static musl, rustls on ring | 3.0 ms, 1.1 MiB | 26 ms | 2.0 MiB |
+| ureq 3, for comparison | 4.3 ms, 2.4 MiB | 21 ms | 1.6 MiB |
 
-An empty C program costs 1.5 ms and 0.7 MiB on that board. The lessons:
-
-- **The TLS library is the cost, not the HTTP client.** OpenSSL 3 spends
-  about 8 ms of CPU and 4.7 MiB on its own initialisation, which libcurl
-  runs even for plain HTTP. With rustls that work disappears.
-- **aws-lc's CPU jitter entropy** (rustls-ffi's default crypto provider)
-  burns hundreds of milliseconds per process on a slow core seeding its
-  RNG. Build with `AWS_LC_SYS_NO_JITTER_ENTROPY=1`, or use ring.
-- **The distro libcurl drags in everything** it was built with: on Debian
-  that is GnuTLS via librtmp, Kerberos, LDAP, libssh2 and more, 34 shared
-  objects and 57 000 relocations per process start. `static-curl` builds a
-  libcurl that knows HTTP(S) and nothing else.
-- `-C relocation-model=static` (no PIE) removes the executable's own
-  relocations; a static musl build removes the dynamic loader entirely.
+An empty C program costs 1.5 ms and 0.7 MiB on that board. The TLS library
+decides, not the HTTP client: OpenSSL 3 spends about 8 ms and 4.7 MiB on its
+own initialisation, which libcurl runs even for plain HTTP. aws-lc, the
+default crypto provider behind `rustls`, seeds its RNG from CPU jitter, which
+costs hundreds of milliseconds per process on a slow core unless
+`AWS_LC_SYS_NO_JITTER_ENTROPY=1` is set at build time. The distro libcurl
+loads everything it was built with, 34 shared objects on Debian.
 
 The leanest configuration, a static musl binary with rustls on ring:
 
@@ -174,20 +172,13 @@ rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"
 CC_aarch64_unknown_linux_musl=musl-gcc cargo build --release --target aarch64-unknown-linux-musl
 ```
 
-With `rustls` instead of `rustls-ring` (and `AWS_LC_SYS_NO_JITTER_ENTROPY=1`
-in the build environment) the same recipe gives the fastest HTTPS on the
-board, at the price of cmake at build time and 1.3 MiB more binary.
-
-The `rustls-ring` feature of the `curl` crate is proposed in
-[sagebind/curl-rust#687](https://github.com/sagebind/curl-rust/pull/687);
-the [benchmark repository](https://github.com/CarloTUM/curlite-bench)
-carries the patch, the build recipe and the measurement scripts. Until it
-lands, `rustls` with `AWS_LC_SYS_NO_JITTER_ENTROPY=1` in the environment of
-the build gets the same cold start and a slightly faster handshake on ARM.
-HTTP/3 in a static build is
-[sagebind/curl-rust#688](https://github.com/sagebind/curl-rust/pull/688):
-an `http3` feature that builds libcurl on ngtcp2 and nghttp3 with OpenSSL's
-QUIC API, passed through here once released.
+The `rustls-ring` feature of the `curl` crate is not released yet
+([curl-rust#687](https://github.com/sagebind/curl-rust/pull/687); the
+benchmark repository carries the patch). Until it lands, `rustls` with
+`AWS_LC_SYS_NO_JITTER_ENTROPY=1` at build time gives the same cold start and
+needs cmake. HTTP/3 in a static build is
+[curl-rust#688](https://github.com/sagebind/curl-rust/pull/688), passed
+through here once released.
 
 ## How it runs
 
@@ -198,7 +189,9 @@ demand and libcurl pauses the transfer when 128 KiB are buffered and not yet
 read. Writers, response readers and progress callbacks run between those
 steps, never inside libcurl's callbacks, so they may send requests of their
 own. A request body reader is read from inside libcurl's read callback; a
-request it sends from there gets a private handle.
+request it sends from there gets a private handle. A `Client` is plain
+configuration, `Send` and `Sync`; the libcurl handles belong to the thread
+that sends.
 
 ## Why libcurl
 
