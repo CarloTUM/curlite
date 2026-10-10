@@ -51,7 +51,8 @@ pub struct Request {
     pub(crate) headers: HeaderMap,
     pub(crate) body: Body,
     pub(crate) timeout: Duration,
-    pub(crate) connect_timeout: Option<Duration>,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) stall_timeout: Duration,
     pub(crate) follow_redirects: bool,
     pub(crate) max_redirects: u32,
     pub(crate) http_version: Option<HttpVersion>,
@@ -83,8 +84,9 @@ impl Request {
             url: url.to_owned(),
             headers: HeaderMap::new(),
             body: Body::Empty,
-            timeout: Duration::from_secs(20),
-            connect_timeout: None,
+            timeout: Duration::ZERO,
+            connect_timeout: Duration::from_secs(30),
+            stall_timeout: Duration::from_secs(30),
             follow_redirects: true,
             max_redirects: 10,
             http_version: None,
@@ -193,18 +195,33 @@ impl Request {
         self
     }
 
-    /// Time limit for the whole transfer, default 20 seconds. Zero means no
-    /// limit.
+    /// Time limit for one transfer, each redirect hop counting separately.
+    /// Default none: a transfer that keeps moving may take as long as it
+    /// needs, one that stops moving is caught by [`Request::stall_timeout`].
+    /// Zero means no limit.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Time limit for establishing the connection, including the TLS
-    /// handshake. Defaults to libcurl's 300 seconds, bounded by
-    /// [`Request::timeout`].
+    /// handshake, default 30 seconds. Zero restores libcurl's default of
+    /// 300 seconds.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.connect_timeout = Some(timeout);
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Aborts the transfer once no data has moved in either direction for
+    /// this long, default 30 seconds. Unlike [`Request::timeout`] it does
+    /// not punish a large download for being large. Rounded up to whole
+    /// seconds; zero disables the check. A stalled transfer fails with
+    /// [`Error::Curl`] and `is_operation_timedout()`.
+    ///
+    /// Time a [`send_reader`](Request::send_reader) spends waiting for its
+    /// consumer does not count: libcurl only runs while the reader is read.
+    pub fn stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = timeout;
         self
     }
 

@@ -812,3 +812,92 @@ fn streamed_chunks_arrive_without_delay() {
     server.join().unwrap();
 }
 
+#[test]
+fn response_url_is_the_final_one() {
+    let (url, server) = serve(vec![
+        response("302 Found", &[("Location", "/there?x=1")], b""),
+        response("200 OK", &[], b"arrived"),
+        response("302 Found", &[("Location", "/there?x=1")], b""),
+    ]);
+    let resp = curlite::get(&format!("{url}/here")).send().unwrap();
+    assert_eq!(resp.url(), format!("{url}/there?x=1"));
+    assert_eq!(resp.text().unwrap(), "arrived");
+    let reader = curlite::get(&format!("{url}/here"))
+        .follow_redirects(false)
+        .send_reader()
+        .unwrap();
+    assert_eq!(reader.url(), format!("{url}/here"));
+    assert_eq!(reader.status(), StatusCode::FOUND);
+    drop(reader);
+    server.join().unwrap();
+}
+
+/// Sends `head` of a response, then waits for `go` before sending `rest`
+/// and closing.
+fn serve_in_two_pieces(
+    head: String,
+    rest: &'static [u8],
+) -> (String, std::sync::mpsc::Sender<()>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let handle = thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        read_request(&mut conn).unwrap();
+        conn.write_all(head.as_bytes()).unwrap();
+        conn.flush().unwrap();
+        if wait.recv().is_ok() {
+            let _ = conn.write_all(rest);
+        }
+        // dropping `conn` closes the connection; the client may keep it in
+        // its cache, so waiting for it to hang up would never return
+    });
+    (url, go, handle)
+}
+
+#[test]
+fn stalled_transfer_times_out() {
+    let (url, _go, server) = serve_in_two_pieces(
+        "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc".to_owned(),
+        b"defghij",
+    );
+    let start = std::time::Instant::now();
+    let err = curlite::get(&url)
+        .stall_timeout(Duration::from_secs(1))
+        .send()
+        .unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::Curl(ref e) if e.is_operation_timedout()),
+        "{err:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    drop(_go);
+    server.join().unwrap();
+}
+
+#[test]
+fn slow_consumer_is_not_a_stall() {
+    let (url, go, server) = serve_in_two_pieces(
+        "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc".to_owned(),
+        b"defghij",
+    );
+    let mut reader = curlite::get(&url)
+        .stall_timeout(Duration::from_secs(1))
+        .send_reader()
+        .unwrap();
+    let mut buf = [0; 3];
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"abc");
+    // longer than the stall timeout without touching the reader
+    thread::sleep(Duration::from_millis(1500));
+    go.send(()).unwrap();
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "defghij");
+    drop(reader);
+    server.join().unwrap();
+}

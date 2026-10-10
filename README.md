@@ -33,14 +33,21 @@ for part in response.parts()? {
 
 Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
 `multipart(..)` or, with the `json` feature, `json(&value)`; everything else
-(`query`, `header`, `timeout`, `connect_timeout`, `follow_redirects`,
-`http_version`, `proxy`, `unix_socket`, `ca_bundle`, `compression`) is on
-the builder. `send()` reads the response into memory, `send_to(&mut writer)`
-streams it, `send_reader()` returns an `impl Read` that pulls from the
-connection with backpressure. Responses expose `status()`, `headers()`,
-`body()`, `text()`, `json()`, `form()`, `parts()` (multipart parts as slices
-of the response buffer) and `error_for_status()`. A `Client` holds headers,
-timeouts and connection settings shared by several requests.
+(`query`, `header`, `stall_timeout`, `timeout`, `connect_timeout`,
+`follow_redirects`, `http_version`, `proxy`, `unix_socket`, `ca_bundle`,
+`compression`) is on the builder. `send()` reads the response into memory,
+`send_to(&mut writer)` streams it, `send_reader()` returns an `impl Read`
+that pulls from the connection with backpressure. Responses expose `url()`,
+`status()`, `headers()`, `body()`, `text()`, `json()`, `form()`, `parts()`
+(multipart parts as slices of the response buffer) and `error_for_status()`.
+A `Client` holds headers, timeouts and connection settings shared by several
+requests, and `to_curl()` prints any request as a `curl` command line for
+logs and bug reports.
+
+There is no total time limit by default. A transfer fails when nothing has
+moved for 30 seconds (`stall_timeout`) or the connection takes longer than 30
+seconds to establish (`connect_timeout`); a large download that keeps
+flowing is never cut off. `timeout` adds a hard limit per transfer.
 
 ```rust
 let api = curlite::Client::new()

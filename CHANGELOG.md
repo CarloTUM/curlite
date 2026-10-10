@@ -14,6 +14,10 @@ Breaking:
   `307`/`308` resend the body). `Authorization` is dropped on redirects that
   leave the origin. Exceeding `max_redirects` is `Error::TooManyRedirects`.
 - Every request sends `User-Agent: curlite/<version>` unless one is set.
+- No default `timeout` any more. Transfers fail when no data moves for 30
+  seconds (`stall_timeout`) or the connection takes more than 30 seconds
+  (`connect_timeout`, previously libcurl's 300); `timeout` is opt-in. Both
+  connect and stall timeouts are plain `Duration`s, zero disables.
 - The `params` module and the `serde` feature are gone. The CPEE parameter
   model was specific to one service and is not part of a general HTTP
   client; `Response::parts` and `ResponsePart::parts` give its building
@@ -29,6 +33,9 @@ Added:
   `ca_bundle`, `danger_accept_invalid_certs`, `compression` (on by default:
   libcurl asks for and decodes compressed responses).
 - `Response::error_for_status` and `Error::Status`.
+- `Response::url` and `ResponseReader::url`: where the response came from,
+  after redirects.
+- `Request::to_curl`: the request as a `curl` command line.
 - `ResponsePart::parts` splits a nested multipart part.
 - `Client`: headers, timeouts, redirect and connection settings shared by
   requests.

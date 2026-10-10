@@ -227,6 +227,8 @@ pub(crate) struct Transfer {
     multi: MultiRef,
     token: usize,
     done: bool,
+    /// The URL this hop was sent to.
+    url: String,
 }
 
 impl fmt::Debug for Transfer {
@@ -276,6 +278,7 @@ pub(crate) fn start(
             multi,
             token,
             done: false,
+            url: request.url.clone(),
         };
         transfer.drive(|h| h.headers_done)?;
         let handler = transfer.handler();
@@ -372,8 +375,14 @@ fn same_origin(a: &str, b: &str) -> bool {
 fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Upload>) -> Result<()> {
     easy.url(&request.url)?;
     easy.timeout(request.timeout)?;
-    if let Some(connect_timeout) = request.connect_timeout {
-        easy.connect_timeout(connect_timeout)?;
+    easy.connect_timeout(request.connect_timeout)?;
+    if !request.stall_timeout.is_zero() {
+        // "slower than 1 byte/s for N seconds" is libcurl's stall detector;
+        // N is in whole seconds, so round up rather than silently disable
+        let stall = &request.stall_timeout;
+        let seconds = stall.as_secs() + u64::from(stall.subsec_nanos() > 0);
+        easy.low_speed_limit(1)?;
+        easy.low_speed_time(Duration::from_secs(seconds))?;
     }
     easy.follow_location(false)?;
     if let Some(version) = request.http_version {
@@ -612,6 +621,7 @@ impl Transfer {
         body.shrink_to_fit();
         recycle(easy);
         Ok(Response {
+            url: std::mem::take(&mut self.url),
             status,
             headers,
             body: Bytes::from(body),
@@ -684,6 +694,7 @@ pub(crate) fn send_to(
 #[derive(Debug)]
 pub struct ResponseReader {
     transfer: Transfer,
+    url: String,
     status: StatusCode,
     headers: HeaderMap,
     pos: usize,
@@ -697,12 +708,20 @@ impl ResponseReader {
             .status
             .ok_or_else(|| Error::HeaderParse("transfer ended without a status line".to_owned()))?;
         let headers = std::mem::take(&mut handler.headers);
+        let url = transfer.url.clone();
         Ok(ResponseReader {
             transfer,
+            url,
             status,
             headers,
             pos: 0,
         })
+    }
+
+    /// The URL the response came from: the request's, or the last
+    /// redirect's.
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     pub fn status(&self) -> StatusCode {
@@ -723,6 +742,7 @@ impl ResponseReader {
         let mut body = Vec::new();
         self.read_to_end(&mut body)?;
         Ok(Response {
+            url: std::mem::take(&mut self.url),
             status: self.status,
             headers: std::mem::take(&mut self.headers),
             body: Bytes::from(body),

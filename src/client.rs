@@ -29,7 +29,8 @@ use crate::request::{HttpVersion, Request};
 pub struct Client {
     headers: HeaderMap,
     timeout: Duration,
-    connect_timeout: Option<Duration>,
+    connect_timeout: Duration,
+    stall_timeout: Duration,
     follow_redirects: bool,
     max_redirects: u32,
     http_version: Option<HttpVersion>,
@@ -47,6 +48,7 @@ impl Default for Client {
             headers: HeaderMap::new(),
             timeout: defaults.timeout,
             connect_timeout: defaults.connect_timeout,
+            stall_timeout: defaults.stall_timeout,
             follow_redirects: defaults.follow_redirects,
             max_redirects: defaults.max_redirects,
             http_version: defaults.http_version,
@@ -81,7 +83,13 @@ impl Client {
 
     /// See [`Request::connect_timeout`].
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.connect_timeout = Some(timeout);
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// See [`Request::stall_timeout`].
+    pub fn stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = timeout;
         self
     }
 
@@ -139,6 +147,7 @@ impl Client {
         request.headers = self.headers.clone();
         request.timeout = self.timeout;
         request.connect_timeout = self.connect_timeout;
+        request.stall_timeout = self.stall_timeout;
         request.follow_redirects = self.follow_redirects;
         request.max_redirects = self.max_redirects;
         request.http_version = self.http_version;
@@ -190,6 +199,7 @@ mod tests {
             )
             .timeout(Duration::from_secs(3))
             .connect_timeout(Duration::from_secs(1))
+            .stall_timeout(Duration::from_secs(2))
             .follow_redirects(false)
             .max_redirects(2)
             .http_version(HttpVersion::Http11)
@@ -203,7 +213,8 @@ mod tests {
         assert_eq!(req.headers[USER_AGENT], "client");
         assert_eq!(req.headers["x-a"], "2");
         assert_eq!(req.timeout, Duration::from_secs(3));
-        assert_eq!(req.connect_timeout, Some(Duration::from_secs(1)));
+        assert_eq!(req.connect_timeout, Duration::from_secs(1));
+        assert_eq!(req.stall_timeout, Duration::from_secs(2));
         assert!(!req.follow_redirects);
         assert_eq!(req.max_redirects, 2);
         assert_eq!(req.http_version, Some(HttpVersion::Http11));

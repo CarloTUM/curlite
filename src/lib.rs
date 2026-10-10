@@ -30,7 +30,8 @@
 //! [`Request::send`], streamed to a writer by [`Request::send_to`] or read
 //! on demand through [`Request::send_reader`]. Multipart responses are
 //! split with [`Response::parts`]. A [`Client`] holds headers, timeouts,
-//! proxy and TLS settings shared by several requests.
+//! proxy and TLS settings shared by several requests, and
+//! [`Request::to_curl`] prints any request as a `curl` command line.
 //!
 //! # Features
 //!
@@ -55,6 +56,7 @@ mod client;
 mod error;
 mod request;
 mod response;
+mod to_curl;
 mod transport;
 
 pub use body::Multipart;

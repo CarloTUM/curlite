@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 /// [`Request::send_to`]: crate::Request::send_to
 #[derive(Debug, Clone)]
 pub struct Response {
+    pub(crate) url: String,
     pub(crate) status: StatusCode,
     pub(crate) headers: HeaderMap,
     pub(crate) body: Bytes,
@@ -32,6 +33,12 @@ pub struct ResponsePart {
 }
 
 impl Response {
+    /// The URL the response came from: the request's, or the last
+    /// redirect's when redirects were followed.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     pub fn status(&self) -> StatusCode {
         self.status
     }
