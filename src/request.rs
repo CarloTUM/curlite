@@ -113,6 +113,7 @@ pub struct Request {
     pub(crate) compression: bool,
     pub(crate) auth: Option<Auth>,
     pub(crate) netrc: bool,
+    pub(crate) proxy_auth: Option<Auth>,
     /// Certificate and key files for TLS client authentication.
     pub(crate) client_cert: Option<(PathBuf, PathBuf)>,
     pub(crate) progress: Option<ProgressFn>,
@@ -153,6 +154,7 @@ impl Request {
             compression: true,
             auth: None,
             netrc: false,
+            proxy_auth: None,
             client_cert: None,
             progress: None,
             max_body_size: Some(64 * 1024 * 1024),
@@ -388,6 +390,16 @@ impl Request {
     /// survive redirects.
     pub fn netrc(mut self) -> Self {
         self.netrc = true;
+        self
+    }
+
+    /// Authenticates with the proxy, for the corporate proxies that want
+    /// NTLM or Kerberos. `Basic`, `Digest`, `Ntlm` and `Negotiate` go
+    /// through libcurl's proxy authentication; `Bearer` is sent as a
+    /// `Proxy-Authorization` header. Kept across redirects, since it is
+    /// for the proxy, not the origin.
+    pub fn proxy_auth(mut self, auth: Auth) -> Self {
+        self.proxy_auth = Some(auth);
         self
     }
 

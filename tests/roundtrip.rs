@@ -1122,3 +1122,30 @@ fn send_is_bounded() {
     assert_eq!(sink.len(), 200);
     server.join().unwrap();
 }
+
+#[test]
+fn proxy_auth_goes_to_the_proxy() {
+    // the test server plays the proxy: an absolute request line, and the
+    // credentials in Proxy-Authorization rather than Authorization
+    let (proxy, server) = serve(vec![response("200 OK", &[], b"via proxy")]);
+    let resp = curlite::get("http://origin.invalid/x")
+        .proxy(&proxy)
+        .proxy_auth(curlite::Auth::Basic {
+            user: "pu".into(),
+            password: "pp".into(),
+        })
+        .basic_auth("u", "p")
+        .send()
+        .unwrap();
+    assert_eq!(resp.text().unwrap(), "via proxy");
+    let received = server.join().unwrap().remove(0);
+    assert_eq!(
+        received.request_line,
+        "GET http://origin.invalid/x HTTP/1.1"
+    );
+    assert_eq!(
+        received.header("proxy-authorization"),
+        Some("Basic cHU6cHA=")
+    );
+    assert_eq!(received.header("authorization"), Some("Basic dTpw"));
+}

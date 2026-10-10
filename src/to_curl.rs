@@ -147,6 +147,18 @@ impl Request {
         if self.netrc {
             lines.push("--netrc-optional".to_owned());
         }
+        match &self.proxy_auth {
+            None => {}
+            Some(Auth::Bearer(_)) => {
+                lines.push("--proxy-header \"Proxy-Authorization: Bearer $PROXY_TOKEN\"".to_owned())
+            }
+            Some(Auth::Negotiate) => lines.push("--proxy-negotiate --proxy-user :".to_owned()),
+            Some(Auth::Basic { user, .. }) => lines.push(proxy_user_option("", user)),
+            Some(Auth::Digest { user, .. }) => {
+                lines.push(proxy_user_option("--proxy-digest ", user))
+            }
+            Some(Auth::Ntlm { user, .. }) => lines.push(proxy_user_option("--proxy-ntlm ", user)),
+        }
         if self.follow_redirects {
             lines.push(format!("-L --max-redirs {}", self.max_redirects));
         }
@@ -231,6 +243,18 @@ fn split_userinfo(url: &str) -> (String, Option<&str>) {
 
 /// `-u "user:$PASSWORD"`, the user escaped for double quotes.
 fn user_option(prefix: &str, user: &str) -> String {
+    format!("{prefix}-u \"{}:$PASSWORD\"", escape_double(user))
+}
+
+/// `--proxy-user "user:$PROXY_PASSWORD"`.
+fn proxy_user_option(prefix: &str, user: &str) -> String {
+    format!(
+        "{prefix}--proxy-user \"{}:$PROXY_PASSWORD\"",
+        escape_double(user)
+    )
+}
+
+fn escape_double(user: &str) -> String {
     let mut escaped = String::with_capacity(user.len());
     for c in user.chars() {
         if matches!(c, '"' | '$' | '`' | '\\') {
@@ -238,7 +262,7 @@ fn user_option(prefix: &str, user: &str) -> String {
         }
         escaped.push(c);
     }
-    format!("{prefix}-u \"{escaped}:$PASSWORD\"")
+    escaped
 }
 
 #[cfg(test)]
@@ -376,6 +400,16 @@ mod tests {
         assert_eq!(
             base().auth(Auth::Negotiate).to_curl(),
             "curl 'http://h' \\\n  --negotiate -u :"
+        );
+        assert_eq!(
+            base()
+                .proxy("http://proxy:3128")
+                .proxy_auth(Auth::Ntlm {
+                    user: "dom\\\\u".into(),
+                    password: "p".into()
+                })
+                .to_curl(),
+            "curl 'http://h' \\\n  --proxy-ntlm --proxy-user \"dom\\\\\\\\u:$PROXY_PASSWORD\" \\\n  --proxy 'http://proxy:3128'"
         );
         assert_eq!(
             base().bearer_auth("t").to_curl(),

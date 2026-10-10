@@ -41,6 +41,7 @@ Added:
   printed as shell variables (`-u "user:$PASSWORD"`), never as values.
 - `Request::auth` with `Auth::{Basic, Bearer, Digest, Negotiate, Ntlm}`,
   `basic_auth`, `bearer_auth`, and `netrc` for credentials from `~/.netrc`;
+  `proxy_auth` for the proxy's own challenge (NTLM and Kerberos proxies);
   all also on `Client`.
 - `Request::client_cert` for TLS client certificates.
 - `Request::on_progress`: byte counts in both directions, reported between

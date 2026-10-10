@@ -91,7 +91,7 @@ way. On the request:
 |---|---|
 | `query`, `header` | URL parameter, header; `headers` replaces them all |
 | `body(mime, bytes)`, `form(pairs)`, `json(&value)`, `multipart(form)`, `body_reader(mime, reader)` | the body: raw, urlencoded, JSON (`json` feature), `multipart/form-data`, streamed from a `Read + Seek` |
-| `basic_auth`, `bearer_auth`, `auth(Auth)`, `netrc` | credentials; `Auth` also has `Digest`, `Negotiate` and `Ntlm` |
+| `basic_auth`, `bearer_auth`, `auth(Auth)`, `proxy_auth(Auth)`, `netrc` | credentials for the origin and for the proxy; `Auth` also has `Digest`, `Negotiate` and `Ntlm` |
 | `stall_timeout`, `connect_timeout`, `timeout` | 30 s without data, 30 s to connect, no total limit |
 | `follow_redirects`, `max_redirects` | on, 10 |
 | `http_version`, `proxy`, `unix_socket` | force a version, a proxy instead of the environment's, a socket instead of the host |

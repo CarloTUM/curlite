@@ -480,23 +480,19 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
         // "" advertises every encoding this libcurl can decode
         easy.accept_encoding("")?;
     }
-    if let Some(auth) = &request.auth {
-        static EMPTY: String = String::new();
-        let mut methods = curl::easy::Auth::new();
-        let credentials = match auth {
-            Auth::Basic { user, password } => Some((user, password, methods.basic(true))),
-            Auth::Digest { user, password } => Some((user, password, methods.digest(true))),
-            Auth::Ntlm { user, password } => Some((user, password, methods.ntlm(true))),
-            // libcurl only negotiates once a user is set, `-u :` in curl
-            Auth::Negotiate => Some((&EMPTY, &EMPTY, methods.gssnegotiate(true))),
-            // the header is added below
-            Auth::Bearer(_) => None,
-        };
-        if let Some((user, password, _)) = credentials {
-            easy.username(user)?;
-            easy.password(password)?;
-            easy.http_auth(&methods)?;
-        }
+    if let Some(auth) = &request.auth
+        && let Some((user, password, methods)) = libcurl_auth(auth)
+    {
+        easy.username(user)?;
+        easy.password(password)?;
+        easy.http_auth(&methods)?;
+    }
+    if let Some(auth) = &request.proxy_auth
+        && let Some((user, password, methods)) = libcurl_auth(auth)
+    {
+        easy.proxy_username(user)?;
+        easy.proxy_password(password)?;
+        easy.proxy_auth(&methods)?;
     }
     if request.netrc {
         easy.netrc(curl::easy::NetRc::Optional)?;
@@ -531,6 +527,11 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
         }
     }
 
+    if let Some(Auth::Bearer(token)) = &request.proxy_auth {
+        let mut proxy_headers = curl::easy::List::new();
+        proxy_headers.append(&format!("Proxy-Authorization: Bearer {token}"))?;
+        easy.proxy_headers(proxy_headers)?;
+    }
     let mut header_list = curl::easy::List::new();
     if let Some(Auth::Bearer(token)) = &request.auth
         && !request.headers.contains_key(AUTHORIZATION)
@@ -548,6 +549,27 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     }
     easy.http_headers(header_list)?;
     Ok(())
+}
+
+/// Credentials and methods for libcurl's own authentication; `None` for
+/// `Bearer`, which is a plain header.
+fn libcurl_auth(auth: &Auth) -> Option<(&str, &str, curl::easy::Auth)> {
+    let mut methods = curl::easy::Auth::new();
+    match auth {
+        Auth::Basic { .. } => methods.basic(true),
+        Auth::Digest { .. } => methods.digest(true),
+        Auth::Ntlm { .. } => methods.ntlm(true),
+        Auth::Negotiate => methods.gssnegotiate(true),
+        Auth::Bearer(_) => return None,
+    };
+    let (user, password) = match auth {
+        Auth::Basic { user, password }
+        | Auth::Digest { user, password }
+        | Auth::Ntlm { user, password } => (user.as_str(), password.as_str()),
+        // libcurl only negotiates once a user is set, `-u :` in curl
+        _ => ("", ""),
+    };
+    Some((user, password, methods))
 }
 
 /// The system's hashed certificate directory and one certificate file in

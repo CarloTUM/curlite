@@ -41,6 +41,7 @@ pub struct Client {
     compression: bool,
     auth: Option<Auth>,
     netrc: bool,
+    proxy_auth: Option<Auth>,
     client_cert: Option<(PathBuf, PathBuf)>,
     max_body_size: Option<u64>,
 }
@@ -63,6 +64,7 @@ impl Default for Client {
             compression: defaults.compression,
             auth: defaults.auth,
             netrc: defaults.netrc,
+            proxy_auth: defaults.proxy_auth,
             client_cert: defaults.client_cert,
             max_body_size: defaults.max_body_size,
         }
@@ -174,6 +176,12 @@ impl Client {
         self
     }
 
+    /// See [`Request::proxy_auth`].
+    pub fn proxy_auth(mut self, auth: Auth) -> Self {
+        self.proxy_auth = Some(auth);
+        self
+    }
+
     /// See [`Request::client_cert`].
     pub fn client_cert(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
         self.client_cert = Some((cert.into(), key.into()));
@@ -203,6 +211,7 @@ impl Client {
         request.compression = self.compression;
         request.auth = self.auth.clone();
         request.netrc = self.netrc;
+        request.proxy_auth = self.proxy_auth.clone();
         request.client_cert = self.client_cert.clone();
         request.max_body_size = self.max_body_size;
         request
