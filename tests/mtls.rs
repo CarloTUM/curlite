@@ -28,6 +28,10 @@ fn client_certificate_is_presented() {
         eprintln!("no openssl binary, skipped");
         return;
     }
+    if curl::Version::get().ssl_version().is_none() {
+        eprintln!("libcurl without TLS, skipped");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("curlite-mtls-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let d = dir.as_path();
