@@ -1,9 +1,10 @@
-//! A small blocking HTTP client on top of libcurl.
+//! A small blocking HTTP client on top of libcurl: curl's HTTP stack as a
+//! Rust library, for programs that have to work where they are deployed.
 //!
-//! `curlite` is for programs that call HTTP services and want to stay small:
-//! no async runtime, one libcurl handle per thread with connection reuse,
-//! request bodies held in memory once, and `multipart/form-data` in both
-//! directions.
+//! No async runtime, one libcurl handle per thread with connection reuse,
+//! the machine's proxies, certificate store, `~/.netrc` and single sign-on
+//! honoured, request bodies held in memory once, and `multipart/form-data`
+//! in both directions.
 //!
 //! ```no_run
 //! use curlite::Multipart;

@@ -4,20 +4,17 @@
 [![crates.io](https://img.shields.io/crates/v/curlite.svg)](https://crates.io/crates/curlite)
 [![docs.rs](https://docs.rs/curlite/badge.svg)](https://docs.rs/curlite)
 
-A small blocking HTTP client on top of libcurl, for short-lived processes:
-CLI tools, hooks, cron jobs, plugins and small devices, where an async
-runtime per invocation is pure overhead. No runtime, one connection cache
-per thread, request bodies held in memory once (or streamed from a file),
-response bodies in memory once (or streamed), `multipart/form-data` in both
-directions without copying the parts, and everything libcurl already does:
-HTTP/2, proxies from the environment, Unix sockets, the system certificate
-store, transparent decompression.
+curl's HTTP stack as a Rust library. A small blocking client on libcurl for
+programs that have to work where they are deployed: CLI tools, agents, hooks,
+cron jobs, plugins, distro packages and small devices, behind whatever proxy,
+certificate store and single sign-on the machine has. No async runtime, 20
+crates, and everything libcurl already does.
 
 ```rust
 use curlite::Multipart;
 
 let response = curlite::post("https://example.com/upload?debug=1")
-    .header("Authorization", "Bearer secret")
+    .bearer_auth("secret")
     .multipart(
         Multipart::new()
             .text("description", "quarterly report")
@@ -31,19 +28,74 @@ for part in response.parts()? {
 }
 ```
 
+## What you get
+
+- **The environment, honoured.** `http_proxy`, `no_proxy` and friends, SOCKS,
+  the system certificate store, `~/.netrc`, Kerberos tickets and NTLM: a
+  program on curlite behaves like `curl` does on that machine.
+- **HTTP/2 and HTTP/3**, whatever the libcurl on the machine negotiates.
+- **Bodies both ways without copies.** Raw bytes, forms, JSON, streamed from a
+  file, `multipart/form-data` encoded part by part; multipart responses split
+  into slices of the response buffer.
+- **Streaming with backpressure.** `send_to(&mut writer)`, or `send_reader()`
+  for an `impl Read` that pulls from the socket on demand. A progress callback
+  for both directions.
+- **Timeouts that fit downloads.** No total limit by default; a transfer fails
+  when nothing moves for 30 seconds.
+- **`to_curl()`** prints any request as a `curl` command line, secrets as
+  shell variables, for logs and bug reports.
+
+Compared with the other blocking clients, from their sources
+(ureq 3.4, reqwest 0.12 `blocking`):
+
+| | curlite | ureq | reqwest |
+|---|---|---|---|
+| HTTP/2 | yes | no | yes |
+| HTTP/3 | with a libcurl that has it | no | unstable feature |
+| Proxy from the environment, SOCKS | yes | yes, feature | yes, feature |
+| Basic, Bearer | yes | by header | yes |
+| Digest | yes | no | no |
+| Kerberos (Negotiate), NTLM | yes | no | no |
+| `~/.netrc` | yes | no | no |
+| Unix domain socket | yes | custom transport | yes |
+| Client certificate | yes | yes | yes |
+| Multipart responses | yes | no | no |
+| Progress callback | yes | no | no |
+| Default timeout | stall, 30 s | none | 30 s total |
+| Request as a `curl` command | yes | no | no |
+| Runtime thread | no | no | tokio |
+| Crates in a plain build | 20 | 22 | 85 |
+| TLS | libcurl's: OpenSSL, GnuTLS, Schannel, Secure Transport, or static rustls | rustls, native-tls | rustls, native-tls |
+
+ureq is the better choice when the program must be pure Rust, reqwest when it
+is async anyway. curlite is for the rest: the program that must work in a
+corporate network on Monday, on a Debian box with the distro libcurl, and on a
+router with 64 MiB of RAM, with one binary each.
+
+## Requests
+
 Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
 `multipart(..)` or, with the `json` feature, `json(&value)`; everything else
 (`query`, `header`, `basic_auth`, `bearer_auth`, `auth`, `netrc`,
 `stall_timeout`, `timeout`, `connect_timeout`, `follow_redirects`,
 `http_version`, `proxy`, `unix_socket`, `ca_bundle`, `client_cert`,
-`compression`, `on_progress`) is on the builder. `send()` reads the response into memory,
-`send_to(&mut writer)` streams it, `send_reader()` returns an `impl Read`
-that pulls from the connection with backpressure. Responses expose `url()`,
-`status()`, `headers()`, `body()`, `text()`, `json()`, `form()`, `parts()`
-(multipart parts as slices of the response buffer) and `error_for_status()`.
-A `Client` holds headers, timeouts and connection settings shared by several
-requests, and `to_curl()` prints any request as a `curl` command line for
-logs and bug reports.
+`compression`, `on_progress`) is on the builder. `send()` reads the response
+into memory, `send_to(&mut writer)` streams it, `send_reader()` returns an
+`impl Read` that pulls from the connection with backpressure. Responses
+expose `url()`, `status()`, `headers()`, `body()`, `text()`, `json()`,
+`form()`, `parts()` (multipart parts as slices of the response buffer) and
+`error_for_status()`. A `Client` holds headers, timeouts and connection
+settings shared by several requests.
+
+```rust
+let api = curlite::Client::new()
+    .header(curlite::header::USER_AGENT, curlite::HeaderValue::from_static("tool/1.0"))
+    .netrc();
+let mut file = std::fs::File::create("big.iso")?;
+api.get("https://example.com/big.iso")
+    .on_progress(|p| eprintln!("{} of {:?}", p.downloaded, p.download_total))
+    .send_to(&mut file)?;
+```
 
 Authentication is libcurl's: `Auth::Basic`, `Bearer`, `Digest`, `Negotiate`
 (Kerberos, with the ticket of the process) and `Ntlm`, and `netrc()` takes
@@ -55,19 +107,10 @@ moved for 30 seconds (`stall_timeout`) or the connection takes longer than 30
 seconds to establish (`connect_timeout`); a large download that keeps
 flowing is never cut off. `timeout` adds a hard limit per transfer.
 
-```rust
-let api = curlite::Client::new()
-    .header(curlite::header::USER_AGENT, curlite::HeaderValue::from_static("tool/1.0"))
-    .timeout(std::time::Duration::from_secs(10));
-let mut file = std::fs::File::create("big.iso")?;
-api.get("https://example.com/big.iso").send_to(&mut file)?;
-```
-
 Redirects are followed by `curlite` itself, with the verb handling of RFC
 9110: `303` turns any method into `GET`, `301`/`302` do so for `POST`,
-`307`/`308` resend the body. `Authorization` is dropped when a redirect leaves
-the origin. libcurl's own following is not used because it keeps a custom verb
-such as `DELETE` across every redirect.
+`307`/`308` resend the body. libcurl's own following is not used because it
+keeps a custom verb such as `DELETE` across every redirect.
 
 ## TLS and linking
 
