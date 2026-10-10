@@ -40,7 +40,8 @@ serde_json = { version = "1", optional = true }
 thiserror = "2"
 
 [package.metadata.docs.rs]
-all-features = true
+# not all-features: that would build libcurl from source on docs.rs
+features = ["json", "log"]
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
