@@ -24,6 +24,19 @@ jobs:
       - run: cargo test --all-features
       - run: cargo test --no-default-features
 
+  other-os:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features json,log
+
   rustls:
     name: test (static curl + rustls)
     runs-on: ubuntu-latest
