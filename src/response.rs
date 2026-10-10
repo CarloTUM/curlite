@@ -3,8 +3,6 @@ use http::StatusCode;
 use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use mime::{BOUNDARY, Mime};
 
-use std::str::FromStr;
-
 use crate::error::{Error, Result};
 
 /// A response, read completely into memory (or, for [`Request::send_to`],
@@ -151,19 +149,22 @@ pub(crate) fn parse_multipart(body: &Bytes, boundary: &str) -> Result<Vec<Respon
         let mut headers = HeaderMap::new();
         loop {
             let line_end = find(body, pos, b"\n").ok_or_else(truncated)?;
-            let line = std::str::from_utf8(&body[pos..line_end])
-                .map_err(|_| Error::Multipart("part header is not UTF-8".to_owned()))?
-                .trim_end_matches('\r');
+            let line = &body[pos..line_end];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
             pos = line_end + 1;
             if line.is_empty() {
                 break;
             }
-            let Some((name, value)) = line.split_once(':') else {
-                return Err(Error::Multipart(format!("malformed part header {line:?}")));
+            let Some(colon) = line.iter().position(|&b| b == b':') else {
+                return Err(Error::Multipart(format!(
+                    "malformed part header {:?}",
+                    String::from_utf8_lossy(line)
+                )));
             };
             headers.append(
-                HeaderName::from_str(name.trim()).map_err(|e| malformed(&e))?,
-                HeaderValue::from_str(value.trim()).map_err(|e| malformed(&e))?,
+                HeaderName::from_bytes(line[..colon].trim_ascii()).map_err(|e| malformed(&e))?,
+                HeaderValue::from_bytes(line[colon + 1..].trim_ascii())
+                    .map_err(|e| malformed(&e))?,
             );
         }
 
@@ -179,17 +180,19 @@ pub(crate) fn parse_multipart(body: &Bytes, boundary: &str) -> Result<Vec<Respon
         }
         let end = end.max(pos);
 
-        // the header lines were checked to be UTF-8 above; `to_str` would
-        // reject the non-ASCII names browsers send
+        // `to_str` would reject the non-ASCII names browsers send; bytes that
+        // are not UTF-8 (Latin-1 from an old server) become U+FFFD
         let disposition = headers
             .get(CONTENT_DISPOSITION)
-            .map(|v| std::str::from_utf8(v.as_bytes()).map_err(|e| malformed(&e)))
-            .transpose()?;
+            .map(|v| String::from_utf8_lossy(v.as_bytes()));
         parts.push(ResponsePart {
             name: disposition
+                .as_deref()
                 .and_then(|d| disposition_param(d, "name"))
                 .unwrap_or_default(),
-            filename: disposition.and_then(|d| disposition_param(d, "filename")),
+            filename: disposition
+                .as_deref()
+                .and_then(|d| disposition_param(d, "filename")),
             content_type: parse_content_type(&headers).map_err(|e| malformed(&e))?,
             body: body.slice(pos..end),
         });
@@ -271,36 +274,38 @@ fn disposition_param(value: &str, key: &str) -> Option<String> {
 ///
 /// A new `HTTP/` status line clears `headers` and records the status, so
 /// that headers of earlier phases (`100 Continue`) do not bleed into the
-/// final response. Fails on lines that are not UTF-8 or that `http` does
-/// not accept as header name or value.
+/// final response. Values are kept as bytes, so Latin-1 from an old server
+/// is fine; a line that is no header at all is skipped, as curl and
+/// browsers do. Only a malformed status line is an error.
 pub(crate) fn process_header_line(
     line: &[u8],
     headers: &mut HeaderMap,
     status: &mut Option<StatusCode>,
 ) -> Result<()> {
-    let line = std::str::from_utf8(line)
-        .map_err(|_| Error::HeaderParse("header line is not UTF-8".to_owned()))?;
-    let line = line.trim_end_matches(['\r', '\n']);
+    let line = line.trim_ascii_end();
     if line.is_empty() {
         return Ok(());
     }
-    if let Some(rest) = line.strip_prefix("HTTP/") {
+    if let Some(rest) = line.strip_prefix(b"HTTP/") {
         headers.clear();
-        let code = rest
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse::<u16>().ok())
-            .ok_or_else(|| Error::HeaderParse(format!("malformed status line {line:?}")))?;
+        let code = std::str::from_utf8(rest)
+            .ok()
+            .and_then(|rest| rest.split_whitespace().nth(1)?.parse::<u16>().ok())
+            .ok_or_else(|| {
+                Error::HeaderParse(format!(
+                    "malformed status line {:?}",
+                    String::from_utf8_lossy(line)
+                ))
+            })?;
         *status = Some(StatusCode::from_u16(code)?);
         return Ok(());
     }
-    let Some((name, value)) = line.split_once(':') else {
-        return Ok(());
-    };
-    headers.append(
-        HeaderName::from_str(name.trim())?,
-        HeaderValue::from_str(value.trim())?,
-    );
+    if let Some(colon) = line.iter().position(|&b| b == b':')
+        && let Ok(name) = HeaderName::from_bytes(line[..colon].trim_ascii())
+        && let Ok(value) = HeaderValue::from_bytes(line[colon + 1..].trim_ascii())
+    {
+        headers.append(name, value);
+    }
     Ok(())
 }
 
@@ -320,14 +325,18 @@ mod tests {
         line(b"HTTP/2 200\r\n").unwrap();
         line(b"Content-Type: text/plain\r\n").unwrap();
         line(b"X-Empty:\r\n").unwrap();
+        // skipped, not fatal: no header, bad name, control character
         line(b"garbage line\r\n").unwrap();
-        assert!(line(b"Bad Name: x\r\n").is_err());
-        assert!(line(b"X: \xff\r\n").is_err());
+        line(b"Bad Name: x\r\n").unwrap();
+        line(b"X-Ctl: a\x01b\r\n").unwrap();
+        // Latin-1 is obs-text, kept as bytes
+        line(b"X-Latin1: M\xfcller\r\n").unwrap();
         assert_eq!(status, Some(StatusCode::OK));
         assert!(!headers.contains_key("x-early"));
         assert_eq!(headers[CONTENT_TYPE], "text/plain");
         assert_eq!(headers["x-empty"], "");
-        assert_eq!(headers.len(), 2);
+        assert_eq!(headers["x-latin1"].as_bytes(), b"M\xfcller");
+        assert_eq!(headers.len(), 3);
     }
 
     #[test]

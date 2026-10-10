@@ -42,6 +42,7 @@ pub struct Client {
     auth: Option<Auth>,
     netrc: bool,
     client_cert: Option<(PathBuf, PathBuf)>,
+    max_body_size: Option<u64>,
 }
 
 impl Default for Client {
@@ -63,6 +64,7 @@ impl Default for Client {
             auth: defaults.auth,
             netrc: defaults.netrc,
             client_cert: defaults.client_cert,
+            max_body_size: defaults.max_body_size,
         }
     }
 }
@@ -178,6 +180,12 @@ impl Client {
         self
     }
 
+    /// See [`Request::max_body_size`].
+    pub fn max_body_size(mut self, limit: Option<u64>) -> Self {
+        self.max_body_size = limit;
+        self
+    }
+
     /// Starts a request with this client's defaults.
     pub fn request(&self, method: Method, url: &str) -> Request {
         let mut request = Request::new(method, url);
@@ -196,6 +204,7 @@ impl Client {
         request.auth = self.auth.clone();
         request.netrc = self.netrc;
         request.client_cert = self.client_cert.clone();
+        request.max_body_size = self.max_body_size;
         request
     }
 
@@ -250,7 +259,8 @@ mod tests {
             .compression(false)
             .bearer_auth("t")
             .netrc()
-            .client_cert("/c.pem", "/k.pem");
+            .client_cert("/c.pem", "/k.pem")
+            .max_body_size(None);
         let req = client.post("http://localhost").header("X-A", "2");
         assert_eq!(req.method, Method::POST);
         assert_eq!(req.headers[USER_AGENT], "client");
@@ -275,5 +285,6 @@ mod tests {
         assert_eq!(req.auth, Some(Auth::Bearer("t".into())));
         assert!(req.netrc);
         assert_eq!(req.client_cert, Some(("/c.pem".into(), "/k.pem".into())));
+        assert_eq!(req.max_body_size, None);
     }
 }

@@ -1,7 +1,7 @@
 //! [`Request::to_curl`]: the request as a `curl` command line.
 
 use http::Method;
-use http::header::{AUTHORIZATION, CONTENT_TYPE, PROXY_AUTHORIZATION};
+use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, PROXY_AUTHORIZATION};
 
 use std::fmt::Write as _;
 
@@ -25,11 +25,12 @@ impl Request {
     /// lowercase, as [`http`] stores them. Values are single-quoted for a
     /// POSIX shell, one option per line.
     ///
-    /// Secrets are not printed. Passwords, bearer tokens and the values of
-    /// `Authorization` and `Proxy-Authorization` headers appear as shell
-    /// variables (`-u "user:$PASSWORD"`, `--oauth2-bearer "$TOKEN"`,
-    /// `-H "authorization: $AUTHORIZATION"`), so the output is safe for a
-    /// log and runs once the variable is exported.
+    /// Credentials are not printed. Passwords, bearer tokens, credentials
+    /// in the URL and the values of `Authorization`, `Proxy-Authorization`
+    /// and `Cookie` headers appear as shell variables (`-u "user:$PASSWORD"`,
+    /// `--oauth2-bearer "$TOKEN"`, `-H "cookie: $COOKIE"`), so the output
+    /// runs once the variable is exported. Anything else, including a key in
+    /// the query string or a header of your own, is printed as it is.
     ///
     /// ```
     /// let request = curlite::post("https://example.com/api?v=1")
@@ -55,6 +56,11 @@ impl Request {
             &Method::POST if has_body => {}
             method => lines.push(format!("-X {method}")),
         }
+        // credentials in the URL become -u, like the others
+        let (url, user) = split_userinfo(&self.url);
+        if let Some(user) = user {
+            lines.push(user_option("", user));
+        }
         let has_authorization = self.headers.contains_key(AUTHORIZATION);
         match &self.auth {
             None => {}
@@ -68,7 +74,7 @@ impl Request {
         for (name, value) in &self.headers {
             let value = String::from_utf8_lossy(value.as_bytes());
             let value = value.trim();
-            let line = if name == AUTHORIZATION || name == PROXY_AUTHORIZATION {
+            let line = if name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE {
                 let variable = name.as_str().to_ascii_uppercase().replace('-', "_");
                 format!("-H \"{name}: ${variable}\"")
             } else if value.is_empty() {
@@ -178,7 +184,7 @@ impl Request {
             lines.push("--compressed".to_owned());
         }
 
-        let mut out = format!("curl {}", quote(&self.url));
+        let mut out = format!("curl {}", quote(&url));
         for line in &lines {
             out.push_str(" \\\n  ");
             out.push_str(line);
@@ -206,6 +212,21 @@ fn inline(data: &[u8]) -> Option<&str> {
 /// Single-quoted for a POSIX shell; a `'` inside becomes `'\''`.
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The URL without its `user:password@`, and the user name if there was one.
+fn split_userinfo(url: &str) -> (String, Option<&str>) {
+    let Some(start) = url.find("://").map(|i| i + 3) else {
+        return (url.to_owned(), None);
+    };
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| start + i);
+    let Some(at) = url[start..end].rfind('@').map(|i| start + i) else {
+        return (url.to_owned(), None);
+    };
+    let user = url[start..at].split(':').next().unwrap_or("");
+    (format!("{}{}", &url[..start], &url[at + 1..]), Some(user))
 }
 
 /// `-u "user:$PASSWORD"`, the user escaped for double quotes.
@@ -359,6 +380,17 @@ mod tests {
         assert_eq!(
             base().bearer_auth("t").to_curl(),
             "curl 'http://h' \\\n  --oauth2-bearer \"$TOKEN\""
+        );
+        assert_eq!(
+            base().header("Cookie", "session=abc").to_curl(),
+            "curl 'http://h' \\\n  -H \"cookie: $COOKIE\""
+        );
+        assert_eq!(
+            get("http://al:pw@h/p?k=v")
+                .follow_redirects(false)
+                .compression(false)
+                .to_curl(),
+            "curl 'http://h/p?k=v' \\\n  -u \"al:$PASSWORD\""
         );
         // an explicit header wins over the bearer, and is itself hidden
         let explicit = base()

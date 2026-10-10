@@ -116,6 +116,7 @@ pub struct Request {
     /// Certificate and key files for TLS client authentication.
     pub(crate) client_cert: Option<(PathBuf, PathBuf)>,
     pub(crate) progress: Option<ProgressFn>,
+    pub(crate) max_body_size: Option<u64>,
     /// First error from a builder method, returned by `send`.
     error: Option<Error>,
 }
@@ -154,6 +155,7 @@ impl Request {
             netrc: false,
             client_cert: None,
             progress: None,
+            max_body_size: Some(64 * 1024 * 1024),
             error: None,
         }
     }
@@ -289,8 +291,13 @@ impl Request {
     ///
     /// Redirects are followed by this crate, not by libcurl: `303` turns any
     /// method into `GET`, `301` and `302` turn `POST` into `GET`, `307` and
-    /// `308` resend the body with the same method. `Authorization` is
-    /// dropped when the redirect leaves the origin (scheme, host and port).
+    /// `308` resend the body with the same method. Only `http` and `https`
+    /// targets are followed, anything else is [`Error::UnsupportedScheme`].
+    /// `Authorization`, `Cookie` and [`Request::auth`] credentials are
+    /// dropped when the redirect leaves the origin (scheme, host and port);
+    /// other headers, such as an API key of your own, travel with the
+    /// request, as do proxy, Unix socket and client certificate settings,
+    /// like in curl.
     pub fn follow_redirects(mut self, follow: bool) -> Self {
         self.follow_redirects = follow;
         self
@@ -389,6 +396,16 @@ impl Request {
     /// same file.
     pub fn client_cert(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
         self.client_cert = Some((cert.into(), key.into()));
+        self
+    }
+
+    /// Upper bound for a body that [`Request::send`] holds in memory,
+    /// default 64 MiB. A larger `Content-Length` fails before the body is
+    /// read, a body that grows past the bound fails as it arrives, both
+    /// with [`Error::BodyTooLarge`]. `None` removes the bound.
+    /// [`Request::send_to`] and [`Request::send_reader`] are not bounded.
+    pub fn max_body_size(mut self, limit: Option<u64>) -> Self {
+        self.max_body_size = limit;
         self
     }
 

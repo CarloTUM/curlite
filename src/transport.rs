@@ -7,7 +7,7 @@
 use bytes::Bytes;
 use curl::easy::{Easy2, Handler as CurlHandler, ReadError, SeekResult, WriteError};
 use curl::multi::{Easy2Handle, Multi};
-use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, LOCATION};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, LOCATION};
 use http::{Method, StatusCode};
 
 use std::any::Any;
@@ -82,6 +82,9 @@ pub(crate) struct Handler {
     sent: u64,
     /// Body bytes not yet consumed.
     body: Vec<u8>,
+    /// `Request::max_body_size` in memory mode.
+    limit: Option<u64>,
+    too_large: bool,
     /// Pause the transfer when `body` holds this much.
     pause_above: Option<usize>,
     paused: bool,
@@ -113,6 +116,13 @@ impl CurlHandler for Handler {
             // the chunk is delivered again after unpause
             self.paused = true;
             return Err(WriteError::Pause);
+        }
+        if let Some(limit) = self.limit
+            && self.received + data.len() as u64 > limit
+        {
+            // a short count is a write error to libcurl; the transfer ends
+            self.too_large = true;
+            return Ok(0);
         }
         if self.presize
             && self.body.is_empty()
@@ -187,6 +197,12 @@ impl CurlHandler for Handler {
                 .get(CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok()?.trim().parse().ok());
             self.content_length = self.expected_len.map(|n| n as u64);
+            if let (Some(limit), Some(len)) = (self.limit, self.content_length)
+                && len > limit
+            {
+                self.too_large = true;
+                return false;
+            }
         }
         true
     }
@@ -278,6 +294,9 @@ pub(crate) fn start(
         let handler = easy.get_mut();
         handler.clear();
         handler.presize = matches!(mode, Mode::Memory);
+        handler.limit = matches!(mode, Mode::Memory)
+            .then_some(request.max_body_size)
+            .flatten();
         handler.pause_above = matches!(mode, Mode::Stream).then_some(PAUSE_ABOVE);
         handler.source = upload.as_mut().and_then(|upload| upload.source.take());
         if let Err(e) = configure(&mut easy, &request, upload.as_ref()) {
@@ -345,6 +364,7 @@ pub(crate) fn start(
         hops += 1;
         if !same_origin(&request.url, &next) {
             request.headers.remove(AUTHORIZATION);
+            request.headers.remove(COOKIE);
             request.auth = None;
         }
         request.url = next;
@@ -392,6 +412,14 @@ fn same_origin(a: &str, b: &str) -> bool {
 }
 
 fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Upload>) -> Result<()> {
+    // this is an HTTP client, and redirects bypass libcurl's protocol
+    // limits: a Location of gopher:// or file:// must not be opened
+    if let Some((scheme, _)) = request.url.split_once("://")
+        && !scheme.eq_ignore_ascii_case("http")
+        && !scheme.eq_ignore_ascii_case("https")
+    {
+        return Err(Error::UnsupportedScheme(request.url.clone()));
+    }
     easy.url(&request.url)?;
     easy.timeout(request.timeout)?;
     easy.connect_timeout(request.connect_timeout)?;
@@ -646,6 +674,9 @@ impl Transfer {
         }
         if let Some(e) = handler.header_err.take() {
             return Err(e);
+        }
+        if handler.too_large {
+            return Err(Error::BodyTooLarge(handler.limit.unwrap_or(0)));
         }
         if let Some(e) = handler.read_err.take() {
             return Err(e.into());

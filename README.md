@@ -79,7 +79,7 @@ Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
 (`query`, `header`, `basic_auth`, `bearer_auth`, `auth`, `netrc`,
 `stall_timeout`, `timeout`, `connect_timeout`, `follow_redirects`,
 `http_version`, `proxy`, `unix_socket`, `ca_bundle`, `client_cert`,
-`compression`, `on_progress`) is on the builder. `send()` reads the response
+`compression`, `max_body_size`, `on_progress`) is on the builder. `send()` reads the response
 into memory, `send_to(&mut writer)` streams it, `send_reader()` returns an
 `impl Read` that pulls from the connection with backpressure. Responses
 expose `url()`, `status()`, `headers()`, `body()`, `text()`, `json()`,
@@ -195,8 +195,10 @@ Each thread owns one libcurl multi handle, which holds the connection cache,
 and one easy handle that is reused from request to request. A request is
 driven step by step, so a `send_reader()` body is pulled from the socket on
 demand and libcurl pauses the transfer when 128 KiB are buffered and not yet
-read. Writers and readers run between those steps, never inside libcurl's
-callbacks, so they may send requests of their own.
+read. Writers, response readers and progress callbacks run between those
+steps, never inside libcurl's callbacks, so they may send requests of their
+own. A request body reader is read from inside libcurl's read callback; a
+request it sends from there gets a private handle.
 
 ## Why libcurl
 

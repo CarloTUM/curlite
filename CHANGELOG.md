@@ -35,6 +35,8 @@ Added:
 - `Response::error_for_status` and `Error::Status`.
 - `Response::url` and `ResponseReader::url`: where the response came from,
   after redirects.
+- `Request::max_body_size`, default 64 MiB, bounds what `send` holds in
+  memory; `Error::BodyTooLarge`. `send_to` and `send_reader` are unbounded.
 - `Request::to_curl`: the request as a `curl` command line. Secrets are
   printed as shell variables (`-u "user:$PASSWORD"`), never as values.
 - `Request::auth` with `Auth::{Basic, Bearer, Digest, Negotiate, Ntlm}`,
@@ -65,8 +67,16 @@ Changed:
   (`/etc/ssl/certs/<hash>.0`), CA certificates are looked up by hash on
   demand instead of parsing the whole bundle per process, unless
   `ca_bundle` is set. About a third less CPU per HTTPS process on x86.
-- Writers and readers run between libcurl's steps, never inside its
-  callbacks, and may send requests of their own.
+- Writers, response readers and progress callbacks run between libcurl's
+  steps, never inside its callbacks, and may send requests of their own; a
+  request body reader runs inside libcurl's read callback and gets a
+  private handle for requests it sends from there.
+- Redirects are only followed to `http` and `https` URLs; anything else is
+  `Error::UnsupportedScheme`, as is such a URL on the request itself.
+  `Cookie` joins `Authorization` in being dropped when a redirect leaves
+  the origin.
+- Header values may be any bytes `http` accepts (Latin-1 included); lines
+  that are no header are skipped instead of failing the request.
 - Part names and filenames in multipart responses may be non-ASCII and may
   contain `;` inside quotes.
 - CI runs on `master`.

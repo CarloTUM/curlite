@@ -28,6 +28,11 @@ impl Received {
 /// was received. `responses` are complete HTTP responses without framing
 /// help: they must carry a `Content-Length` or `Connection: close`.
 fn serve(responses: Vec<String>) -> (String, JoinHandle<Vec<Received>>) {
+    serve_bytes(responses.into_iter().map(String::into_bytes).collect())
+}
+
+/// Like [`serve`], for responses that are not UTF-8.
+fn serve_bytes(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<Received>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let handle = thread::spawn(move || {
@@ -47,7 +52,7 @@ fn serve(responses: Vec<String>) -> (String, JoinHandle<Vec<Received>>) {
                 }
             };
             received.push(request);
-            conn.write_all(response.as_bytes()).unwrap();
+            conn.write_all(&response).unwrap();
             conn.flush().unwrap();
             stream = Some(conn);
         }
@@ -257,15 +262,14 @@ fn connection_is_reused_on_the_same_thread() {
 }
 
 #[test]
-fn invalid_response_header_is_an_error() {
-    let (url, server) = serve(vec![
-        "HTTP/1.1 200 OK\r\nBad Header Name: x\r\nContent-Length: 0\r\n\r\n".to_owned(),
+fn odd_header_lines_are_tolerated() {
+    let (url, server) = serve_bytes(vec![
+        b"HTTP/1.1 200 OK\r\nX-Name: M\xfcller\r\nBad Header Name: x\r\nContent-Length: 2\r\n\r\nok".to_vec(),
     ]);
-    let err = curlite::get(&url).send().unwrap_err();
-    assert!(
-        matches!(err, curlite::Error::InvalidHeaderName(_)),
-        "{err:?}"
-    );
+    let resp = curlite::get(&url).send().unwrap();
+    assert_eq!(resp.headers()["x-name"].as_bytes(), b"M\xfcller");
+    assert!(!resp.headers().contains_key("bad header name"));
+    assert_eq!(resp.text().unwrap(), "ok");
     server.join().unwrap();
 }
 
@@ -964,7 +968,12 @@ fn credentials_do_not_leave_the_origin() {
         response("302 Found", &[("Location", "/same")], b""),
         response("302 Found", &[("Location", &other_url)], b""),
     ]);
-    let resp = curlite::get(&url).basic_auth("u", "p").send().unwrap();
+    let resp = curlite::get(&url)
+        .basic_auth("u", "p")
+        .header("Cookie", "s=1")
+        .header("X-Api-Key", "k")
+        .send()
+        .unwrap();
     assert_eq!(resp.text().unwrap(), "other");
     let received = server.join().unwrap();
     assert!(received[0].header("authorization").is_some());
@@ -972,7 +981,14 @@ fn credentials_do_not_leave_the_origin() {
         received[1].header("authorization").is_some(),
         "same origin keeps them"
     );
+    assert_eq!(received[1].header("cookie"), Some("s=1"));
     let received = other.join().unwrap();
+    assert_eq!(received[0].header("cookie"), None, "other port drops them");
+    assert_eq!(
+        received[0].header("x-api-key"),
+        Some("k"),
+        "own headers travel"
+    );
     assert_eq!(
         received[0].header("authorization"),
         None,
@@ -1050,5 +1066,59 @@ fn client_cert_only_matters_for_tls() {
         .send()
         .unwrap();
     assert_eq!(resp.text().unwrap(), "plain");
+    server.join().unwrap();
+}
+
+#[test]
+fn redirects_stay_on_http() {
+    for target in [
+        "gopher://127.0.0.1:1/_x",
+        "file:///etc/hostname",
+        "dict://127.0.0.1:1/d",
+    ] {
+        let (url, server) = serve(vec![response("302 Found", &[("Location", target)], b"")]);
+        let err = curlite::get(&url).send().unwrap_err();
+        assert!(
+            matches!(err, curlite::Error::UnsupportedScheme(ref u) if u == target),
+            "{target}: {err:?}"
+        );
+        server.join().unwrap();
+    }
+    let err = curlite::get("file:///etc/hostname").send().unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::UnsupportedScheme(_)),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn send_is_bounded() {
+    let body = vec![b'x'; 200];
+    // Content-Length over the bound: refused before the body
+    let (url, server) = serve(vec![response("200 OK", &[], &body)]);
+    let err = curlite::get(&url)
+        .max_body_size(Some(100))
+        .send()
+        .unwrap_err();
+    assert!(matches!(err, curlite::Error::BodyTooLarge(100)), "{err:?}");
+    server.join().unwrap();
+    // unknown length: refused as the body grows
+    let mut raw = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+    raw.extend_from_slice(&body);
+    let (url, server) = serve_bytes(vec![raw.clone()]);
+    let err = curlite::get(&url)
+        .max_body_size(Some(100))
+        .send()
+        .unwrap_err();
+    assert!(matches!(err, curlite::Error::BodyTooLarge(100)), "{err:?}");
+    server.join().unwrap();
+    // streaming is not bounded
+    let (url, server) = serve_bytes(vec![raw]);
+    let mut sink = Vec::new();
+    curlite::get(&url)
+        .max_body_size(Some(100))
+        .send_to(&mut sink)
+        .unwrap();
+    assert_eq!(sink.len(), 200);
     server.join().unwrap();
 }

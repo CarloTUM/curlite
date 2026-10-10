@@ -44,6 +44,16 @@ pub enum Error {
     /// [`Response::error_for_status`]: crate::Response::error_for_status
     #[error("HTTP {}", .0.status())]
     Status(Box<crate::Response>),
+    /// The request or a redirect points at a URL whose scheme is not `http`
+    /// or `https`. Redirects are followed by this crate, so libcurl's own
+    /// protocol limits do not apply to them.
+    #[error("unsupported URL scheme: {0}")]
+    UnsupportedScheme(String),
+    /// The response body is larger than [`Request::max_body_size`] allows.
+    ///
+    /// [`Request::max_body_size`]: crate::Request::max_body_size
+    #[error("response body larger than {0} bytes")]
+    BodyTooLarge(u64),
     /// JSON serialization or parsing failed.
     #[cfg(feature = "json")]
     #[error("JSON error: {0}")]
