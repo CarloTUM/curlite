@@ -1,6 +1,6 @@
 [package]
 name = "curlite"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Small blocking HTTP client on top of libcurl: forms, multipart and raw bodies without an async runtime"

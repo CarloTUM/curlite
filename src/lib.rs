@@ -1,10 +1,9 @@
 //! A small blocking HTTP client on top of libcurl.
 //!
 //! `curlite` is for programs that call HTTP services and want to stay small:
-//! no async runtime, one libcurl handle per thread, request bodies held in
-//! memory once. It was written for a process engine on single-board computers
-//! and its memory use was measured against `reqwest` there; see the README
-//! for the numbers.
+//! no async runtime, one libcurl handle per thread with connection reuse,
+//! request bodies held in memory once, and `multipart/form-data` in both
+//! directions.
 //!
 //! ```no_run
 //! use curlite::Multipart;

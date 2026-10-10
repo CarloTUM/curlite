@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
+
+- README and crate docs reworked; no code changes.
+
+## 0.1.0
 
 Initial release. `curlite` grew out of `http_helper`, the HTTP client of the
-[WEEL](https://github.com/CarloTUM/rusty_weel) process engine, written for the
-bachelor's thesis *Where the Memory Goes: Design and Evaluation of a
-Synchronous Rust HTTP Client for Process Instances on Edge Devices* (TUM,
-2026).
+[WEEL](https://github.com/CarloTUM/rusty_weel) process engine.
 
 Compared to `http_helper`:
 
