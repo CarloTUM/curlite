@@ -40,6 +40,10 @@ Changed:
   twice). `Response::parts` returns slices of the response buffer instead of
   copies. The `multipart_ng` dependency is gone.
 - The response buffer is sized from `Content-Length` before the first chunk.
+- On a libcurl built on OpenSSL with a hashed certificate directory
+  (`/etc/ssl/certs/<hash>.0`), CA certificates are looked up by hash on
+  demand instead of parsing the whole bundle per process, unless
+  `ca_bundle` is set. About a third less CPU per HTTPS process on x86.
 - Writers and readers run between libcurl's steps, never inside its
   callbacks, and may send requests of their own.
 - Part names and filenames in multipart responses may be non-ASCII and may

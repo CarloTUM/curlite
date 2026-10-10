@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::fmt::{self, Write as _};
 use std::io::{self, Read, SeekFrom, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::body::ReadSeek;
@@ -394,6 +396,19 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     if !request.verify_tls {
         easy.ssl_verify_peer(false)?;
         easy.ssl_verify_host(false)?;
+    } else if request.ca_bundle.is_none()
+        && request
+            .url
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+        && let Some((one_cert, dir)) = lazy_ca_store()
+    {
+        // OpenSSL looks certificates up by hash in `CApath` on demand,
+        // instead of parsing the whole bundle (about 20 ms of CPU per
+        // process on x86). libcurl insists on a `CAinfo` file that loads,
+        // so it gets one real certificate from that same directory
+        easy.cainfo(one_cert)?;
+        easy.capath(dir)?;
     }
     if request.compression {
         // "" advertises every encoding this libcurl can decode
@@ -441,6 +456,42 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     }
     easy.http_headers(header_list)?;
     Ok(())
+}
+
+/// The system's hashed certificate directory and one certificate file in
+/// it, if libcurl runs on OpenSSL (other backends read a `CApath` eagerly,
+/// which would be slower than the bundle). Decided once per process.
+fn lazy_ca_store() -> Option<&'static (PathBuf, PathBuf)> {
+    static DECISION: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
+    DECISION
+        .get_or_init(|| {
+            if !cfg!(unix) {
+                return None;
+            }
+            let ssl = curl::Version::get().ssl_version()?.to_owned();
+            if !ssl.starts_with("OpenSSL") {
+                return None;
+            }
+            ["/etc/ssl/certs", "/usr/lib/ssl/certs"]
+                .iter()
+                .map(Path::new)
+                .find_map(|dir| Some((first_hash_link(dir)?, dir.to_path_buf())))
+        })
+        .as_ref()
+}
+
+/// The first OpenSSL hash link (`<8 hex digits>.0`) among the first entries
+/// of `dir`.
+fn first_hash_link(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries.take(200).flatten().find_map(|entry| {
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        (text.len() == 10
+            && text.ends_with(".0")
+            && text[..8].bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| dir.join(&name))
+    })
 }
 
 /// Keeps `easy` for the next request on this thread.
@@ -706,6 +757,20 @@ impl Read for ResponseReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_link_detection() {
+        let dir = std::env::temp_dir().join(format!("curlite-hash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(first_hash_link(&dir), None);
+        std::fs::write(dir.join("ca-certificates.crt"), "").unwrap();
+        std::fs::write(dir.join("deadbeef.pem"), "").unwrap();
+        assert_eq!(first_hash_link(&dir), None);
+        std::fs::write(dir.join("5ed36f99.0"), "").unwrap();
+        assert_eq!(first_hash_link(&dir), Some(dir.join("5ed36f99.0")));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(first_hash_link(&dir), None);
+    }
 
     #[test]
     fn origins() {

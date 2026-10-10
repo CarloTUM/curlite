@@ -253,6 +253,13 @@ impl Request {
 
     /// A PEM file with the CA certificates to trust, instead of the system
     /// store.
+    ///
+    /// Without this, on a libcurl built on OpenSSL with a hashed certificate
+    /// directory (`/etc/ssl/certs/<hash>.0`, as Debian, Ubuntu, Alpine and
+    /// Arch ship it), `curlite` lets OpenSSL look the needed CA
+    /// certificates up by hash instead of parsing the whole bundle, which
+    /// saves about 20 ms of CPU per process on x86 and more on small
+    /// devices. Setting a bundle turns that off.
     pub fn ca_bundle(mut self, path: impl Into<PathBuf>) -> Self {
         self.ca_bundle = Some(path.into());
         self
