@@ -62,7 +62,7 @@ mod transport;
 pub use body::Multipart;
 pub use client::Client;
 pub use error::{Error, Result};
-pub use request::{Auth, HttpVersion, Request, delete, get, head, patch, post, put};
+pub use request::{Auth, HttpVersion, Progress, Request, delete, get, head, patch, post, put};
 pub use response::{Response, ResponsePart};
 pub use transport::ResponseReader;
 

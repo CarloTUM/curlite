@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use crate::body::ReadSeek;
 use crate::error::{Error, Result};
-use crate::request::{Auth, HttpVersion, Request, Upload};
+use crate::request::{Auth, HttpVersion, Progress, ProgressFn, Request, Upload};
 use crate::response::{Response, process_header_line};
 
 /// Streaming transfers pause once this much body is buffered and not yet
@@ -76,6 +76,10 @@ pub(crate) struct Handler {
     /// `Content-Length`, reserved before the first body chunk when `presize`.
     expected_len: Option<usize>,
     presize: bool,
+    content_length: Option<u64>,
+    /// Body bytes accepted from and handed to libcurl, for progress.
+    received: u64,
+    sent: u64,
     /// Body bytes not yet consumed.
     body: Vec<u8>,
     /// Pause the transfer when `body` holds this much.
@@ -119,6 +123,7 @@ impl CurlHandler for Handler {
             let _ = self.body.try_reserve_exact(len);
         }
         self.body.extend_from_slice(data);
+        self.received += data.len() as u64;
         Ok(data.len())
     }
 
@@ -136,7 +141,10 @@ impl CurlHandler for Handler {
             }
         }));
         match result {
-            Ok(Ok(n)) => Ok(n),
+            Ok(Ok(n)) => {
+                self.sent += n as u64;
+                Ok(n)
+            }
             Ok(Err(e)) => {
                 self.read_err = Some(e);
                 Err(ReadError::Abort)
@@ -178,6 +186,7 @@ impl CurlHandler for Handler {
                 .headers
                 .get(CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok()?.trim().parse().ok());
+            self.content_length = self.expected_len.map(|n| n as u64);
         }
         true
     }
@@ -229,6 +238,10 @@ pub(crate) struct Transfer {
     done: bool,
     /// The URL this hop was sent to.
     url: String,
+    progress: Option<ProgressFn>,
+    upload_total: Option<u64>,
+    /// `(received, sent)` at the last progress report.
+    reported: (u64, u64),
 }
 
 impl fmt::Debug for Transfer {
@@ -258,6 +271,7 @@ pub(crate) fn start(
     let mut easy = SPARE
         .with(|spare| spare.borrow_mut().take())
         .unwrap_or_else(|| Easy2::new(Handler::default()));
+    let mut progress = request.progress.take();
     let mut hops = 0;
     loop {
         easy.reset();
@@ -279,6 +293,9 @@ pub(crate) fn start(
             token,
             done: false,
             url: request.url.clone(),
+            progress: progress.take(),
+            upload_total: upload.as_ref().map(|u| u.len),
+            reported: (0, 0),
         };
         transfer.drive(|h| h.headers_done)?;
         let handler = transfer.handler();
@@ -297,6 +314,7 @@ pub(crate) fn start(
             transfer.step(|h| !h.body.is_empty())?;
         }
         let next;
+        progress = transfer.progress.take();
         (easy, multi, next) = transfer.detach()?;
         // the Location header resolved against the request URL
         let Some(next) = next else {
@@ -402,6 +420,10 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     }
     if let Some(path) = &request.ca_bundle {
         easy.cainfo(path)?;
+    }
+    if let Some((cert, key)) = &request.client_cert {
+        easy.ssl_cert(cert)?;
+        easy.ssl_key(key)?;
     }
     if !request.verify_tls {
         easy.ssl_verify_peer(false)?;
@@ -577,7 +599,29 @@ impl Transfer {
         if result.is_err() {
             self.done = true;
         }
+        self.report_progress();
         result
+    }
+
+    /// Calls the progress function when the counts changed, and once at the
+    /// end. Runs between libcurl's steps, so user code never sits inside a
+    /// callback.
+    fn report_progress(&mut self) {
+        let (Some(progress), Some(handle)) = (&mut self.progress, &self.handle) else {
+            return;
+        };
+        let handler = handle.get_ref();
+        let counts = (handler.received, handler.sent);
+        if counts == self.reported && !self.done {
+            return;
+        }
+        self.reported = counts;
+        progress.0(Progress {
+            downloaded: counts.0,
+            download_total: handler.content_length,
+            uploaded: counts.1,
+            upload_total: self.upload_total,
+        });
     }
 
     fn step_inner(&mut self, ready: &dyn Fn(&Handler) -> bool) -> Result<()> {

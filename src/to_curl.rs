@@ -164,6 +164,13 @@ impl Request {
         if let Some(path) = &self.ca_bundle {
             lines.push(format!("--cacert {}", quote(&path.to_string_lossy())));
         }
+        if let Some((cert, key)) = &self.client_cert {
+            lines.push(format!(
+                "--cert {} --key {}",
+                quote(&cert.to_string_lossy()),
+                quote(&key.to_string_lossy())
+            ));
+        }
         if !self.verify_tls {
             lines.push("-k".to_owned());
         }
@@ -373,6 +380,7 @@ mod tests {
             .proxy("socks5h://localhost:1080")
             .unix_socket("/run/docker.sock")
             .ca_bundle("/etc/ca.pem")
+            .client_cert("/c.pem", "/k.pem")
             .danger_accept_invalid_certs()
             .max_redirects(3)
             .timeout(Duration::from_secs(5))
@@ -386,6 +394,7 @@ mod tests {
                --proxy 'socks5h://localhost:1080' \\\n  \
                --unix-socket '/run/docker.sock' \\\n  \
                --cacert '/etc/ca.pem' \\\n  \
+               --cert '/c.pem' --key '/k.pem' \\\n  \
                -k \\\n  \
                --compressed"
         );

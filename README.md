@@ -35,8 +35,8 @@ Bodies are `body(mime, bytes)`, `body_reader(mime, file)`, `form(pairs)`,
 `multipart(..)` or, with the `json` feature, `json(&value)`; everything else
 (`query`, `header`, `basic_auth`, `bearer_auth`, `auth`, `netrc`,
 `stall_timeout`, `timeout`, `connect_timeout`, `follow_redirects`,
-`http_version`, `proxy`, `unix_socket`, `ca_bundle`, `compression`) is on the
-builder. `send()` reads the response into memory,
+`http_version`, `proxy`, `unix_socket`, `ca_bundle`, `client_cert`,
+`compression`, `on_progress`) is on the builder. `send()` reads the response into memory,
 `send_to(&mut writer)` streams it, `send_reader()` returns an `impl Read`
 that pulls from the connection with backpressure. Responses expose `url()`,
 `status()`, `headers()`, `body()`, `text()`, `json()`, `form()`, `parts()`

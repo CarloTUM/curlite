@@ -1012,3 +1012,43 @@ fn netrc_supplies_credentials() {
     assert_eq!(received[0].header("authorization"), Some("Basic bnU6bnA="));
     assert_eq!(received[1].header("authorization"), None, "only when asked");
 }
+
+#[test]
+fn progress_counts_both_directions() {
+    let body = vec![b'x'; 10_000];
+    let (url, server) = serve(vec![response("200 OK", &[], &body)]);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut sink = Vec::new();
+    curlite::post(&url)
+        .body(mime::TEXT_PLAIN, vec![b'y'; 5_000])
+        .on_progress({
+            let seen = seen.clone();
+            move |p| seen.lock().unwrap().push(p)
+        })
+        .send_to(&mut sink)
+        .unwrap();
+    server.join().unwrap();
+    let seen = seen.lock().unwrap();
+    let last = seen.last().unwrap();
+    assert_eq!(last.downloaded, 10_000);
+    assert_eq!(last.download_total, Some(10_000));
+    assert_eq!(last.uploaded, 5_000);
+    assert_eq!(last.upload_total, Some(5_000));
+    assert!(seen.windows(2).all(|w| w[0] != w[1]), "{seen:?}");
+    assert!(
+        seen.windows(2)
+            .all(|w| w[0].downloaded <= w[1].downloaded && w[0].uploaded <= w[1].uploaded),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn client_cert_only_matters_for_tls() {
+    let (url, server) = serve(vec![response("200 OK", &[], b"plain")]);
+    let resp = curlite::get(&url)
+        .client_cert("/nonexistent.pem", "/nonexistent.key")
+        .send()
+        .unwrap();
+    assert_eq!(resp.text().unwrap(), "plain");
+    server.join().unwrap();
+}

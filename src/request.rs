@@ -52,6 +52,29 @@ pub enum Auth {
     },
 }
 
+/// Bytes moved so far in one transfer, see [`Request::on_progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Progress {
+    /// Response body bytes received, after decompression.
+    pub downloaded: u64,
+    /// The response's `Content-Length`, once the headers are in. With
+    /// compression it counts the encoded bytes.
+    pub download_total: Option<u64>,
+    /// Request body bytes sent.
+    pub uploaded: u64,
+    /// The request body's size, `None` without a body.
+    pub upload_total: Option<u64>,
+}
+
+pub(crate) struct ProgressFn(pub(crate) Box<dyn FnMut(Progress)>);
+
+impl std::fmt::Debug for ProgressFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressFn")
+    }
+}
+
 /// A request under construction. Created with [`Request::new`], one of the
 /// free functions ([`get`], [`post`], ...) or a [`Client`], and sent with
 /// [`Request::send`] or [`Request::send_to`].
@@ -90,6 +113,9 @@ pub struct Request {
     pub(crate) compression: bool,
     pub(crate) auth: Option<Auth>,
     pub(crate) netrc: bool,
+    /// Certificate and key files for TLS client authentication.
+    pub(crate) client_cert: Option<(PathBuf, PathBuf)>,
+    pub(crate) progress: Option<ProgressFn>,
     /// First error from a builder method, returned by `send`.
     error: Option<Error>,
 }
@@ -126,6 +152,8 @@ impl Request {
             compression: true,
             auth: None,
             netrc: false,
+            client_cert: None,
+            progress: None,
             error: None,
         }
     }
@@ -353,6 +381,24 @@ impl Request {
     /// survive redirects.
     pub fn netrc(mut self) -> Self {
         self.netrc = true;
+        self
+    }
+
+    /// Authenticates the TLS connection with a client certificate: PEM
+    /// files with the certificate and the private key, which may be the
+    /// same file.
+    pub fn client_cert(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        self.client_cert = Some((cert.into(), key.into()));
+        self
+    }
+
+    /// Reports transfer progress. `f` runs between libcurl's steps whenever
+    /// the byte counts change and once more when the transfer ends, never
+    /// inside a libcurl callback, so it may block or send requests of its
+    /// own. The counts are per transfer: a redirect that is followed starts
+    /// them over.
+    pub fn on_progress(mut self, f: impl FnMut(Progress) + 'static) -> Self {
+        self.progress = Some(ProgressFn(Box::new(f)));
         self
     }
 

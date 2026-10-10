@@ -41,6 +41,7 @@ pub struct Client {
     compression: bool,
     auth: Option<Auth>,
     netrc: bool,
+    client_cert: Option<(PathBuf, PathBuf)>,
 }
 
 impl Default for Client {
@@ -61,6 +62,7 @@ impl Default for Client {
             compression: defaults.compression,
             auth: defaults.auth,
             netrc: defaults.netrc,
+            client_cert: defaults.client_cert,
         }
     }
 }
@@ -170,6 +172,12 @@ impl Client {
         self
     }
 
+    /// See [`Request::client_cert`].
+    pub fn client_cert(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        self.client_cert = Some((cert.into(), key.into()));
+        self
+    }
+
     /// Starts a request with this client's defaults.
     pub fn request(&self, method: Method, url: &str) -> Request {
         let mut request = Request::new(method, url);
@@ -187,6 +195,7 @@ impl Client {
         request.compression = self.compression;
         request.auth = self.auth.clone();
         request.netrc = self.netrc;
+        request.client_cert = self.client_cert.clone();
         request
     }
 
@@ -240,7 +249,8 @@ mod tests {
             .danger_accept_invalid_certs()
             .compression(false)
             .bearer_auth("t")
-            .netrc();
+            .netrc()
+            .client_cert("/c.pem", "/k.pem");
         let req = client.post("http://localhost").header("X-A", "2");
         assert_eq!(req.method, Method::POST);
         assert_eq!(req.headers[USER_AGENT], "client");
@@ -264,5 +274,6 @@ mod tests {
         assert!(!req.compression);
         assert_eq!(req.auth, Some(Auth::Bearer("t".into())));
         assert!(req.netrc);
+        assert_eq!(req.client_cert, Some(("/c.pem".into(), "/k.pem".into())));
     }
 }

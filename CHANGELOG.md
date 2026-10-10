@@ -40,6 +40,9 @@ Added:
 - `Request::auth` with `Auth::{Basic, Bearer, Digest, Negotiate, Ntlm}`,
   `basic_auth`, `bearer_auth`, and `netrc` for credentials from `~/.netrc`;
   all also on `Client`.
+- `Request::client_cert` for TLS client certificates.
+- `Request::on_progress`: byte counts in both directions, reported between
+  libcurl's steps, never from inside a callback.
 - `ResponsePart::parts` splits a nested multipart part.
 - `Client`: headers, timeouts, redirect and connection settings shared by
   requests.
