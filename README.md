@@ -167,6 +167,11 @@ The leanest configuration, a static musl binary with rustls on ring:
 curlite = { version = "0.2", default-features = false }
 curl = { version = "0.4", default-features = false, features = ["rustls-ring", "static-curl"] }
 
+# until curl-rust#687 is released, the feature comes from its branch
+[patch.crates-io]
+curl = { git = "https://github.com/CarloTUM/curl-rust", branch = "rustls-ring" }
+curl-sys = { git = "https://github.com/CarloTUM/curl-rust", branch = "rustls-ring" }
+
 # .cargo/config.toml
 [target.aarch64-unknown-linux-musl]
 rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
@@ -177,10 +182,9 @@ CC_aarch64_unknown_linux_musl=musl-gcc cargo build --release --target aarch64-un
 ```
 
 The `rustls-ring` feature of the `curl` crate is not released yet
-([curl-rust#687](https://github.com/sagebind/curl-rust/pull/687); the
-benchmark repository carries the patch). Until it lands, `rustls` with
-`AWS_LC_SYS_NO_JITTER_ENTROPY=1` at build time gives the same cold start and
-needs cmake. HTTP/3 in a static build is
+([curl-rust#687](https://github.com/sagebind/curl-rust/pull/687)), hence
+the `[patch]`. Without it, `rustls` with `AWS_LC_SYS_NO_JITTER_ENTROPY=1` at
+build time gives the same cold start and needs cmake. HTTP/3 in a static build is
 [curl-rust#688](https://github.com/sagebind/curl-rust/pull/688), passed
 through here once released.
 
