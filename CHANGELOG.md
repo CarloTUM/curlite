@@ -37,8 +37,9 @@ Added:
   after redirects.
 - `Request::max_body_size`, default 64 MiB, bounds what `send` holds in
   memory; `Error::BodyTooLarge`. `send_to` and `send_reader` are unbounded.
-- `Request::to_curl`: the request as a `curl` command line. Secrets are
-  printed as shell variables (`-u "user:$PASSWORD"`), never as values.
+- `Request::to_curl`: the request as a `curl` command line. Credentials
+  are printed as shell variables (`-u "user:$PASSWORD"`), never as values;
+  part names, filenames and bodies cannot break out of their options.
 - `Request::auth` with `Auth::{Basic, Bearer, Digest, Negotiate, Ntlm}`,
   `basic_auth`, `bearer_auth`, and `netrc` for credentials from `~/.netrc`;
   `proxy_auth` for the proxy's own challenge (NTLM and Kerberos proxies);

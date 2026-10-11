@@ -7,7 +7,10 @@
 use bytes::Bytes;
 use curl::easy::{Easy2, Handler as CurlHandler, ReadError, SeekResult, WriteError};
 use curl::multi::{Easy2Handle, Multi};
-use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, LOCATION};
+use http::header::{
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, LOCATION,
+    PROXY_AUTHORIZATION,
+};
 use http::{Method, StatusCode};
 
 use std::any::Any;
@@ -197,12 +200,6 @@ impl CurlHandler for Handler {
                 .get(CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok()?.trim().parse().ok());
             self.content_length = self.expected_len.map(|n| n as u64);
-            if let (Some(limit), Some(len)) = (self.limit, self.content_length)
-                && len > limit
-            {
-                self.too_large = true;
-                return false;
-            }
         }
         true
     }
@@ -294,9 +291,6 @@ pub(crate) fn start(
         let handler = easy.get_mut();
         handler.clear();
         handler.presize = matches!(mode, Mode::Memory);
-        handler.limit = matches!(mode, Mode::Memory)
-            .then_some(request.max_body_size)
-            .flatten();
         handler.pause_above = matches!(mode, Mode::Stream).then_some(PAUSE_ABOVE);
         handler.source = upload.as_mut().and_then(|upload| upload.source.take());
         if let Err(e) = configure(&mut easy, &request, upload.as_ref()) {
@@ -323,6 +317,21 @@ pub(crate) fn start(
             .ok_or_else(|| Error::HeaderParse("transfer ended without a status line".to_owned()))?;
         if !request.follow_redirects || !is_followed(status, handler.headers.contains_key(LOCATION))
         {
+            // the response that is kept: bound it, unless it has no body
+            if matches!(mode, Mode::Memory)
+                && let Some(limit) = request.max_body_size
+            {
+                let no_body =
+                    request.method == Method::HEAD || matches!(status.as_u16(), 204 | 304);
+                // bytes that arrived with the headers count too
+                if !no_body
+                    && (handler.content_length.is_some_and(|len| len > limit)
+                        || handler.received > limit)
+                {
+                    return Err(Error::BodyTooLarge(limit));
+                }
+                transfer.handler_mut().limit = Some(limit);
+            }
             return Ok(transfer);
         }
         // a redirect to follow: finish it, discarding its body (which in
@@ -365,6 +374,7 @@ pub(crate) fn start(
         if !same_origin(&request.url, &next) {
             request.headers.remove(AUTHORIZATION);
             request.headers.remove(COOKIE);
+            request.headers.remove(PROXY_AUTHORIZATION);
             request.auth = None;
         }
         request.url = next;
@@ -414,7 +424,7 @@ fn same_origin(a: &str, b: &str) -> bool {
 fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Upload>) -> Result<()> {
     // this is an HTTP client, and redirects bypass libcurl's protocol
     // limits: a Location of gopher:// or file:// must not be opened
-    if let Some((scheme, _)) = request.url.split_once("://")
+    if let Some(scheme) = scheme(&request.url)
         && !scheme.eq_ignore_ascii_case("http")
         && !scheme.eq_ignore_ascii_case("https")
     {
@@ -527,16 +537,21 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
         }
     }
 
-    if let Some(Auth::Bearer(token)) = &request.proxy_auth {
-        let mut proxy_headers = curl::easy::List::new();
-        proxy_headers.append(&format!("Proxy-Authorization: Bearer {token}"))?;
-        easy.proxy_headers(proxy_headers)?;
+    if let Some(Auth::Bearer(_)) = &request.proxy_auth {
+        // CURLOPT_PROXYHEADER only works with CURLOPT_HEADEROPT, which the
+        // curl crate does not expose yet; a plain header would also reach
+        // the origin
+        return Err(Error::UnsupportedScheme(
+            "Bearer is not a proxy authentication scheme".to_owned(),
+        ));
     }
     let mut header_list = curl::easy::List::new();
     if let Some(Auth::Bearer(token)) = &request.auth
         && !request.headers.contains_key(AUTHORIZATION)
     {
-        header_list.append(&format!("Authorization: Bearer {token}"))?;
+        // a token with a line break would smuggle a header
+        let value = HeaderValue::from_str(&format!("Bearer {token}"))?;
+        header_list.append(&format!("Authorization: {}", value.to_str()?))?;
     }
     let mut line = String::new();
     for (name, value) in &request.headers {
@@ -549,6 +564,21 @@ fn configure(easy: &mut Easy2<Handler>, request: &Request, upload: Option<&Uploa
     }
     easy.http_headers(header_list)?;
     Ok(())
+}
+
+/// The URL's scheme, if it has one: the part before the first `:` when
+/// that is a scheme name and not a host followed by a port (`localhost:8080`),
+/// which libcurl reads as `http://`. `file:/x` and `dict:x` have no `//`
+/// and count as schemes.
+fn scheme(url: &str) -> Option<&str> {
+    let (candidate, rest) = url.split_once(':')?;
+    let name = candidate.as_bytes().first()?.is_ascii_alphabetic()
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b));
+    let port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let is_port = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+    (name && !is_port).then_some(candidate)
 }
 
 /// Credentials and methods for libcurl's own authentication; `None` for
@@ -920,6 +950,19 @@ mod tests {
         assert_eq!(first_hash_link(&dir), Some(dir.join("5ed36f99.0")));
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(first_hash_link(&dir), None);
+    }
+
+    #[test]
+    fn schemes() {
+        assert_eq!(scheme("http://a"), Some("http"));
+        assert_eq!(scheme("HTTPS://a"), Some("HTTPS"));
+        assert_eq!(scheme("file:/etc/passwd"), Some("file"));
+        assert_eq!(scheme("dict:x"), Some("dict"));
+        assert_eq!(scheme("gopher://h"), Some("gopher"));
+        assert_eq!(scheme("localhost:8080/x"), None);
+        assert_eq!(scheme("localhost/x?a=b:c"), None);
+        assert_eq!(scheme("example.com"), None);
+        assert_eq!(scheme(""), None);
     }
 
     #[test]

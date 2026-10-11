@@ -1151,3 +1151,82 @@ fn proxy_auth_goes_to_the_proxy() {
     );
     assert_eq!(received.header("authorization"), Some("Basic dTpw"));
 }
+
+#[test]
+fn bound_ignores_responses_without_a_body() {
+    // a HEAD announces the size of a body it does not send
+    let (url, server) = serve(vec![
+        "HTTP/1.1 200 OK\r\nContent-Length: 100000000\r\n\r\n".to_owned(),
+        "HTTP/1.1 304 Not Modified\r\nContent-Length: 100000000\r\n\r\n".to_owned(),
+    ]);
+    let resp = curlite::head(&url).max_body_size(Some(10)).send().unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = curlite::get(&url).max_body_size(Some(10)).send().unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    server.join().unwrap();
+}
+
+#[test]
+fn large_redirect_body_does_not_count_against_the_bound() {
+    let big = vec![b'r'; 5000];
+    let (url, server) = serve(vec![
+        response("302 Found", &[("Location", "/small")], &big),
+        response("200 OK", &[], b"small"),
+    ]);
+    let resp = curlite::get(&url).max_body_size(Some(1000)).send().unwrap();
+    assert_eq!(resp.text().unwrap(), "small");
+    server.join().unwrap();
+}
+
+#[test]
+fn redirect_to_a_scheme_without_slashes_is_refused() {
+    let (url, server) = serve(vec![response(
+        "302 Found",
+        &[("Location", "file:/etc/hostname")],
+        b"",
+    )]);
+    let err = curlite::get(&url).send().unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::UnsupportedScheme(_)),
+        "{err:?}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn hostile_bearer_and_proxy_bearer_are_errors() {
+    let err = curlite::get("http://localhost")
+        .bearer_auth("x\r\nX-Evil: 1")
+        .send()
+        .unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::InvalidHeaderValue(_)),
+        "{err:?}"
+    );
+    let err = curlite::get("http://localhost")
+        .proxy("http://localhost:1")
+        .proxy_auth(curlite::Auth::Bearer("t".into()))
+        .send()
+        .unwrap_err();
+    assert!(
+        matches!(err, curlite::Error::UnsupportedScheme(_)),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn proxy_authorization_header_does_not_leave_the_origin() {
+    let (other_url, other) = serve(vec![response("200 OK", &[], b"other")]);
+    let (url, server) = serve(vec![response(
+        "302 Found",
+        &[("Location", &other_url)],
+        b"",
+    )]);
+    curlite::get(&url)
+        .header("Proxy-Authorization", "Basic x")
+        .send()
+        .unwrap();
+    server.join().unwrap();
+    let received = other.join().unwrap();
+    assert_eq!(received[0].header("proxy-authorization"), None);
+}

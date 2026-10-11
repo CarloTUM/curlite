@@ -1,7 +1,7 @@
 //! [`Request::to_curl`]: the request as a `curl` command line.
 
 use http::Method;
-use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, PROXY_AUTHORIZATION};
+use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, PROXY_AUTHORIZATION, USER_AGENT};
 
 use std::fmt::Write as _;
 
@@ -19,7 +19,9 @@ impl Request {
     /// Everything that reaches the wire is in it: method, URL, headers, the
     /// body, redirect handling, HTTP version, proxy, Unix socket, CA bundle,
     /// certificate verification and compression. Timeouts are not; they do
-    /// not change the request. Text bodies and fields up to 64 KiB are
+    /// not change the request. One difference remains: with `-L`, curl keeps
+    /// a verb such as `DELETE` across redirects where this crate switches to
+    /// `GET` as RFC 9110 says. Text bodies and fields up to 64 KiB are
     /// quoted inline, binary or larger ones and streamed bodies become `@-`
     /// (standard input) with a note in a trailing comment. Header names are
     /// lowercase, as [`http`] stores them. Values are single-quoted for a
@@ -35,11 +37,13 @@ impl Request {
     /// ```
     /// let request = curlite::post("https://example.com/api?v=1")
     ///     .basic_auth("alice", "secret")
+    ///     .header("User-Agent", "tool/1.0")
     ///     .form([("name", "a b")]);
     /// assert_eq!(
     ///     request.to_curl(),
     ///     "curl 'https://example.com/api?v=1' \\\n  \
     ///        -u \"alice:$PASSWORD\" \\\n  \
+    ///        -H 'user-agent: tool/1.0' \\\n  \
     ///        --data 'name=a+b' \\\n  \
     ///        -L --max-redirs 10 \\\n  \
     ///        --compressed"
@@ -71,7 +75,12 @@ impl Request {
             Some(Auth::Digest { user, .. }) => lines.push(user_option("--digest ", user)),
             Some(Auth::Ntlm { user, .. }) => lines.push(user_option("--ntlm ", user)),
         }
+        // the crate sets the Content-Type of forms and multipart itself
+        let own_content_type = matches!(self.body, Body::Form(_) | Body::Multipart(_));
         for (name, value) in &self.headers {
+            if own_content_type && name == CONTENT_TYPE {
+                continue;
+            }
             let value = String::from_utf8_lossy(value.as_bytes());
             let value = value.trim();
             let line = if name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE {
@@ -102,7 +111,8 @@ impl Request {
         match &self.body {
             Body::Empty => {}
             Body::Raw { data, .. } => match inline(data) {
-                Some(text) => lines.push(format!("--data-binary {}", quote(text))),
+                // --data-raw: a body starting with `@` is not a file name
+                Some(text) => lines.push(format!("--data-raw {}", quote(text))),
                 None => {
                     lines.push("--data-binary @-".to_owned());
                     notes.push(format!("body: {} bytes on standard input", data.len()));
@@ -114,25 +124,27 @@ impl Request {
                     let inline_text = (part.content_type.is_none() && part.filename.is_none())
                         .then(|| inline(&part.data))
                         .flatten();
+                    // curl reads the part name up to `=`; a name that -F
+                    // cannot carry is replaced, with a note
+                    let name = form_name(&part.name, &mut notes);
                     match inline_text {
                         // --form-string takes the value literally, -F would
                         // read `@file` and `<file`
                         Some(text) => lines.push(format!(
                             "--form-string {}",
-                            quote(&format!("{}={text}", part.name))
+                            quote(&format!("{name}={text}"))
                         )),
                         None => {
-                            let mut spec = format!("{}=@-", part.name);
+                            let mut spec = format!("{name}=@-");
                             if let Some(filename) = &part.filename {
-                                let _ = write!(spec, ";filename={filename}");
+                                let _ = write!(spec, ";filename={}", form_quote(filename));
                             }
                             if let Some(content_type) = &part.content_type {
-                                let _ = write!(spec, ";type={content_type}");
+                                let _ = write!(spec, ";type={}", form_quote(content_type.as_ref()));
                             }
                             lines.push(format!("-F {}", quote(&spec)));
                             notes.push(format!(
-                                "{}: {} bytes on standard input",
-                                part.name,
+                                "{name}: {} bytes on standard input",
                                 part.data.len()
                             ));
                         }
@@ -174,7 +186,11 @@ impl Request {
             );
         }
         if let Some(proxy) = &self.proxy {
-            lines.push(format!("--proxy {}", quote(proxy)));
+            let (proxy, user) = split_userinfo(proxy);
+            if let Some(user) = user {
+                lines.push(proxy_user_option("", user));
+            }
+            lines.push(format!("--proxy {}", quote(&proxy)));
         }
         if let Some(path) = &self.unix_socket {
             lines.push(format!("--unix-socket {}", quote(&path.to_string_lossy())));
@@ -195,6 +211,13 @@ impl Request {
         if self.compression {
             lines.push("--compressed".to_owned());
         }
+        if !self.headers.contains_key(USER_AGENT) {
+            // what prepare_body adds at send
+            lines.push(format!(
+                "-A {}",
+                quote(concat!("curlite/", env!("CARGO_PKG_VERSION")))
+            ));
+        }
 
         let mut out = format!("curl {}", quote(&url));
         for line in &lines {
@@ -202,8 +225,14 @@ impl Request {
             out.push_str(line);
         }
         if !notes.is_empty() {
+            // a line break in a note would end the comment
             out.push_str("  # ");
-            out.push_str(&notes.join("; "));
+            out.extend(
+                notes
+                    .join("; ")
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c }),
+            );
         }
         out
     }
@@ -241,6 +270,42 @@ fn split_userinfo(url: &str) -> (String, Option<&str>) {
     (format!("{}{}", &url[..start], &url[at + 1..]), Some(user))
 }
 
+/// A part name as `-F` can carry it: without `=`, `;`, quotes or control
+/// characters. Anything else is replaced and noted.
+fn form_name(name: &str, notes: &mut Vec<String>) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '=' | ';' | '"' | '\\') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if safe != name {
+        notes.push(format!("part name {name:?} written as {safe:?}"));
+    }
+    safe
+}
+
+/// A `-F` option value in curl's double quotes, `"` and `\` escaped.
+fn form_quote(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// `-u "user:$PASSWORD"`, the user escaped for double quotes.
 fn user_option(prefix: &str, user: &str) -> String {
     format!("{prefix}-u \"{}:$PASSWORD\"", escape_double(user))
@@ -271,25 +336,48 @@ mod tests {
     use std::io::Cursor;
     use std::time::Duration;
 
+    /// The `-A` line every request without a User-Agent header gets; the
+    /// expectations below leave it out.
+    const UA: &str = concat!(" \\\n  -A 'curlite/", env!("CARGO_PKG_VERSION"), "'");
+
     #[test]
     fn get_with_defaults() {
         let request = get("https://example.com/a?b=1").query("c", "d e");
         assert_eq!(
-            request.to_curl(),
+            request.to_curl().replace(UA, ""),
             "curl 'https://example.com/a?b=1&c=d+e' \\\n  -L --max-redirs 10 \\\n  --compressed"
         );
     }
 
     #[test]
     fn methods() {
-        assert!(head("http://h").to_curl().contains("\n  -I \\\n"));
-        assert!(delete("http://h").to_curl().contains("\n  -X DELETE \\\n"));
-        let put = put("http://h").body(mime::TEXT_PLAIN, "x").to_curl();
+        assert!(
+            head("http://h")
+                .to_curl()
+                .replace(UA, "")
+                .contains("\n  -I \\\n")
+        );
+        assert!(
+            delete("http://h")
+                .to_curl()
+                .replace(UA, "")
+                .contains("\n  -X DELETE \\\n")
+        );
+        let put = put("http://h")
+            .body(mime::TEXT_PLAIN, "x")
+            .to_curl()
+            .replace(UA, "");
         assert!(put.contains("\n  -X PUT \\\n"), "{put}");
         // -d implies POST, GET with a body has to say so
-        let post = post("http://h").form([("a", "b")]).to_curl();
+        let post = post("http://h")
+            .form([("a", "b")])
+            .to_curl()
+            .replace(UA, "");
         assert!(!post.contains("-X"), "{post}");
-        let get = get("http://h").body(mime::TEXT_PLAIN, "x").to_curl();
+        let get = get("http://h")
+            .body(mime::TEXT_PLAIN, "x")
+            .to_curl()
+            .replace(UA, "");
         assert!(get.contains("-X GET"), "{get}");
     }
 
@@ -301,7 +389,7 @@ mod tests {
             .follow_redirects(false)
             .compression(false);
         assert_eq!(
-            request.to_curl(),
+            request.to_curl().replace(UA, ""),
             "curl 'http://h' \\\n  -H 'x-empty;' \\\n  -H 'x-quote: it'\\''s'"
         );
     }
@@ -312,16 +400,18 @@ mod tests {
             .body(mime::APPLICATION_JSON, r#"{"a":"b'c"}"#)
             .follow_redirects(false)
             .compression(false)
-            .to_curl();
+            .to_curl()
+            .replace(UA, "");
         assert_eq!(
             text,
-            "curl 'http://h' \\\n  -H 'Content-Type: application/json' \\\n  --data-binary '{\"a\":\"b'\\''c\"}'"
+            "curl 'http://h' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"a\":\"b'\\''c\"}'"
         );
         // an explicit Content-Type header is not repeated
         let explicit = post("http://h")
             .header("Content-Type", "text/x-custom")
             .body(mime::APPLICATION_JSON, "{}")
-            .to_curl();
+            .to_curl()
+            .replace(UA, "");
         assert_eq!(explicit.to_lowercase().matches("content-type").count(), 1);
         assert!(explicit.contains("text/x-custom"));
 
@@ -329,14 +419,16 @@ mod tests {
             .body(mime::APPLICATION_OCTET_STREAM, &b"\x00\x01\x02"[..])
             .follow_redirects(false)
             .compression(false)
-            .to_curl();
+            .to_curl()
+            .replace(UA, "");
         assert_eq!(
             binary,
             "curl 'http://h' \\\n  -H 'Content-Type: application/octet-stream' \\\n  --data-binary @-  # body: 3 bytes on standard input"
         );
         let large = post("http://h")
             .body(mime::TEXT_PLAIN, vec![b'a'; 64 * 1024 + 1])
-            .to_curl();
+            .to_curl()
+            .replace(UA, "");
         assert!(large.contains("--data-binary @- \\\n"), "{large}");
         assert!(large.ends_with("# body: 65537 bytes on standard input"));
     }
@@ -353,18 +445,19 @@ mod tests {
             .follow_redirects(false)
             .compression(false);
         assert_eq!(
-            request.to_curl(),
+            request.to_curl().replace(UA, ""),
             "curl 'http://h' \\\n  \
                --form-string 'note=@not a file' \\\n  \
-               -F 'doc=@-;filename=q3.pdf;type=application/pdf' \\\n  \
-               -F 'raw=@-;type=application/octet-stream'  \
+               -F 'doc=@-;filename=\"q3.pdf\";type=\"application/pdf\"' \\\n  \
+               -F 'raw=@-;type=\"application/octet-stream\"'  \
                # doc: 4 bytes on standard input; raw: 1 bytes on standard input"
         );
         let streamed = put("http://h")
             .body_reader(mime::TEXT_PLAIN, Cursor::new(b"x".to_vec()))
             .follow_redirects(false)
             .compression(false)
-            .to_curl();
+            .to_curl()
+            .replace(UA, "");
         assert_eq!(
             streamed,
             "curl 'http://h' \\\n  -X PUT \\\n  -H 'Content-Type: text/plain' \\\n  --data-binary @-  # body: streamed, on standard input"
@@ -375,7 +468,10 @@ mod tests {
     fn secrets_become_variables() {
         let base = || get("http://h").follow_redirects(false).compression(false);
         assert_eq!(
-            base().basic_auth("al\"i$ce", "pw").to_curl(),
+            base()
+                .basic_auth("al\"i$ce", "pw")
+                .to_curl()
+                .replace(UA, ""),
             "curl 'http://h' \\\n  -u \"al\\\"i\\$ce:$PASSWORD\""
         );
         assert_eq!(
@@ -384,7 +480,8 @@ mod tests {
                     user: "u".into(),
                     password: "p".into()
                 })
-                .to_curl(),
+                .to_curl()
+                .replace(UA, ""),
             "curl 'http://h' \\\n  --digest -u \"u:$PASSWORD\""
         );
         assert_eq!(
@@ -394,11 +491,12 @@ mod tests {
                     password: "p".into()
                 })
                 .netrc()
-                .to_curl(),
+                .to_curl()
+                .replace(UA, ""),
             "curl 'http://h' \\\n  --ntlm -u \"u:$PASSWORD\" \\\n  --netrc-optional"
         );
         assert_eq!(
-            base().auth(Auth::Negotiate).to_curl(),
+            base().auth(Auth::Negotiate).to_curl().replace(UA, ""),
             "curl 'http://h' \\\n  --negotiate -u :"
         );
         assert_eq!(
@@ -408,22 +506,27 @@ mod tests {
                     user: "dom\\\\u".into(),
                     password: "p".into()
                 })
-                .to_curl(),
+                .to_curl()
+                .replace(UA, ""),
             "curl 'http://h' \\\n  --proxy-ntlm --proxy-user \"dom\\\\\\\\u:$PROXY_PASSWORD\" \\\n  --proxy 'http://proxy:3128'"
         );
         assert_eq!(
-            base().bearer_auth("t").to_curl(),
+            base().bearer_auth("t").to_curl().replace(UA, ""),
             "curl 'http://h' \\\n  --oauth2-bearer \"$TOKEN\""
         );
         assert_eq!(
-            base().header("Cookie", "session=abc").to_curl(),
+            base()
+                .header("Cookie", "session=abc")
+                .to_curl()
+                .replace(UA, ""),
             "curl 'http://h' \\\n  -H \"cookie: $COOKIE\""
         );
         assert_eq!(
             get("http://al:pw@h/p?k=v")
                 .follow_redirects(false)
                 .compression(false)
-                .to_curl(),
+                .to_curl()
+                .replace(UA, ""),
             "curl 'http://h/p?k=v' \\\n  -u \"al:$PASSWORD\""
         );
         // an explicit header wins over the bearer, and is itself hidden
@@ -431,12 +534,71 @@ mod tests {
             .bearer_auth("t")
             .header("Authorization", "Basic abc")
             .header("Proxy-Authorization", "Basic xyz")
-            .to_curl();
+            .to_curl()
+            .replace(UA, "");
         assert_eq!(
             explicit,
             "curl 'http://h' \\\n  -H \"authorization: $AUTHORIZATION\" \\\n  -H \"proxy-authorization: $PROXY_AUTHORIZATION\""
         );
         assert!(!explicit.contains("abc") && !explicit.contains("xyz"));
+    }
+
+    #[test]
+    fn user_agent_data_raw_and_hostile_names() {
+        let base = || get("http://h").follow_redirects(false).compression(false);
+        assert_eq!(
+            base().to_curl(),
+            format!("curl 'http://h'{UA}")
+        );
+        assert!(
+            !base()
+                .header("User-Agent", "x")
+                .to_curl()
+                .contains("curlite/")
+        );
+        // a body starting with @ is data, not a file
+        assert!(
+            post("http://h")
+                .body(mime::TEXT_PLAIN, "@/etc/hosts")
+                .to_curl()
+                .contains("--data-raw '@/etc/hosts'")
+        );
+        // part names, filenames and types cannot break out of the -F spec
+        // or end the trailing comment
+        let hostile = post("http://h")
+            .multipart(
+                Multipart::new()
+                    .file(
+                        "a=b;c\nrm -rf /",
+                        "x\";headers=@/etc/passwd",
+                        mime::APPLICATION_OCTET_STREAM,
+                        &b"\xff"[..],
+                    )
+                    .text("n=1", "v"),
+            )
+            .to_curl();
+        assert!(hostile.contains("-F 'a_b_c_rm -rf /=@-;filename=\"x\\\";headers=@/etc/passwd\";type=\"application/octet-stream\"'"), "{hostile}");
+        assert!(hostile.contains("--form-string 'n_1=v'"), "{hostile}");
+        assert_eq!(
+            hostile.matches('\n').count(),
+            hostile.matches(" \\\n").count(),
+            "{hostile}"
+        );
+        // user:password in a proxy URL becomes --proxy-user
+        assert!(
+            base()
+                .proxy("http://pu:pp@proxy:3128")
+                .to_curl()
+                .contains("--proxy-user \"pu:$PROXY_PASSWORD\" \\\n  --proxy 'http://proxy:3128'")
+        );
+        // a user Content-Type is overridden for forms, so it is not printed
+        assert!(
+            !post("http://h")
+                .header("Content-Type", "text/plain")
+                .form([("a", "b")])
+                .to_curl()
+                .contains("text/plain")
+        );
     }
 
     #[test]
@@ -453,7 +615,7 @@ mod tests {
             .stall_timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(5));
         assert_eq!(
-            request.to_curl(),
+            request.to_curl().replace(UA, ""),
             "curl 'http://h' \\\n  \
                -L --max-redirs 3 \\\n  \
                --http2-prior-knowledge \\\n  \

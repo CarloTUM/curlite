@@ -234,6 +234,11 @@ fn disposition_param(value: &str, key: &str) -> Option<String> {
     let mut rest = value.split_once(';')?.1;
     loop {
         let (k, after_eq) = rest.split_once('=')?;
+        // a parameter without a value, `; flag;`, is skipped
+        if let Some(i) = k.find(';') {
+            rest = &rest[i + 1..];
+            continue;
+        }
         let k = k.trim();
         let (v, next) = match after_eq.trim_start().strip_prefix('"') {
             Some(quoted) => {
@@ -406,6 +411,10 @@ mod tests {
         assert_eq!(disposition_param(d, "last").as_deref(), Some("1"));
         assert_eq!(disposition_param(d, "missing"), None);
         assert_eq!(disposition_param("form-data", "name"), None);
+        assert_eq!(
+            disposition_param(r#"form-data; name="a"; flag; filename="x""#, "filename").as_deref(),
+            Some("x")
+        );
         assert_eq!(
             disposition_param("form-data; name=\"open", "name").as_deref(),
             Some("open")

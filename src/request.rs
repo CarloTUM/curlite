@@ -394,10 +394,10 @@ impl Request {
     }
 
     /// Authenticates with the proxy, for the corporate proxies that want
-    /// NTLM or Kerberos. `Basic`, `Digest`, `Ntlm` and `Negotiate` go
-    /// through libcurl's proxy authentication; `Bearer` is sent as a
-    /// `Proxy-Authorization` header. Kept across redirects, since it is
-    /// for the proxy, not the origin.
+    /// NTLM or Kerberos: `Basic`, `Digest`, `Ntlm` and `Negotiate` through
+    /// libcurl's proxy authentication. `Bearer` is not a proxy scheme and
+    /// fails at `send`. Kept across redirects, since it is for the proxy,
+    /// not the origin.
     pub fn proxy_auth(mut self, auth: Auth) -> Self {
         self.proxy_auth = Some(auth);
         self
