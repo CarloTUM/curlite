@@ -546,10 +546,7 @@ mod tests {
     #[test]
     fn user_agent_data_raw_and_hostile_names() {
         let base = || get("http://h").follow_redirects(false).compression(false);
-        assert_eq!(
-            base().to_curl(),
-            format!("curl 'http://h'{UA}")
-        );
+        assert_eq!(base().to_curl(), format!("curl 'http://h'{UA}"));
         assert!(
             !base()
                 .header("User-Agent", "x")
